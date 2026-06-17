@@ -48,15 +48,17 @@
 
   /* stage -------------------------------------------------------------------- */
   #stage { flex: 1; position: relative; min-height: 0; }
-  .view { position: absolute; inset: 0; }
-  #orbit canvas { display: block; width: 100%; height: 100%; cursor: grab; }
-  #orbit-hint { position: absolute; bottom: 12px; left: 16px; color: var(--fg-faint);
+  /* each view is an absolutely-positioned layer; only the active one gets the
+     .show class (toggled by setView). */
+  .view { position: absolute; inset: 0; display: none; }
+  .view.show { display: block; }
+  #orbit canvas, #graph canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  #orbit-hint, #graph-hint { position: absolute; bottom: 12px; left: 16px; color: var(--fg-faint);
     font-family: var(--mono); font-size: 11px; pointer-events: none; letter-spacing: .2px; }
 
-  /* pulse -------------------------------------------------------------------- */
-  #pulse { overflow: auto; background: var(--bg); display: none; }
-  #pulse.show { display: block; }
-  #orbit.hide { display: none; }
+  /* list (was "pulse") ------------------------------------------------------- */
+  #list { overflow: auto; background: var(--bg); }
+  #list.show { display: block; }
   .phead { display: flex; align-items: center; position: sticky; top: 0; z-index: 2;
     background: var(--panel); border-bottom: 1px solid var(--line);
     font-family: var(--ui); font-weight: 600; letter-spacing: .4px;
@@ -77,6 +79,9 @@
     color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
   .pill.all { color: #f0883e; background: rgba(240,136,62,0.13); border-color: rgba(240,136,62,0.4); }
+  /* CPU heat-pill on the value, matching ListView.swift's filled CPU cell */
+  .cpupill { font-family: var(--mono); font-variant-numeric: tabular-nums;
+    color: #0a0c10; font-weight: 600; padding: 1.5px 7px; border-radius: 5px; }
 
   /* HUD ---------------------------------------------------------------------- */
   #hud { position: absolute; top: 0; right: 0; height: 100%; width: 330px; z-index: 9;
@@ -174,18 +179,20 @@
       <b>fleetmap</b><span class="sub">// ORBIT</span>
     </div>
     <div class="vtoggle" id="vtoggle">
+      <button data-view="list">List</button>
+      <button data-view="graph">Graph</button>
       <button data-view="orbit" class="on">Orbit</button>
-      <button data-view="pulse">Pulse</button>
     </div>
     <div id="stats"></div>
   </div>
 
   <div id="stage">
-    <div id="orbit" class="view"><canvas id="ocv"></canvas><div id="orbit-hint">orbit · drag to pan · scroll to zoom · click a body</div></div>
-    <div id="pulse" class="view">
+    <div id="list" class="view">
       <div class="phead" id="phead"></div>
       <div id="pbody"></div>
     </div>
+    <div id="graph" class="view"><canvas id="gcv"></canvas><div id="graph-hint">graph · drag to move · click a node · scroll to zoom · ▸ expands grouped apps</div></div>
+    <div id="orbit" class="view"><canvas id="ocv"></canvas><div id="orbit-hint">orbit · drag to pan · scroll to zoom · click a body</div></div>
     <div id="hud"></div>
   </div>
 </div>
@@ -237,7 +244,7 @@ function oa(hex, a) { const h = hex.replace("#", ""); return `rgba(${parseInt(h.
 const DEFAULTS = { theme: "dark", accent: "#6366f1", density: "comfortable", motion: true, flow: true, bodyStyle: "orb" };
 let TW = loadTweaks();
 let SNAP = { nodes: [], edges: [], hidden: 0 };
-let VIEW = "orbit";
+let VIEW = "orbit";   // "list" | "graph" | "orbit"
 let SELECTED = null;
 const CPU_HIST = new Map();   // id -> Float32 ring of last N cpu samples
 const HIST_LEN = 120;
@@ -428,21 +435,214 @@ const Orbit = (function () {
 })();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Pulse view — per-process CPU waveform (port of Pulse.jsx). Waveform is driven
-// by a REAL rolling CPU-history ring buffer per node, accumulated across pushes.
+// Graph view — force-directed process/connection graph. Faithful port of the
+// production graph.html simulation (repulsion + center gravity + edge springs,
+// enter/leave lifecycle), rendered into the shell's own themed canvas and fed
+// from the same in-memory SNAP the shell already holds (no second document, no
+// iframe). Node clicks route through the shared select()/Mission-HUD path.
 // ─────────────────────────────────────────────────────────────────────────────
-const Pulse = (function () {
+const Graph = (function () {
+  const cv = document.getElementById("gcv");
+  const ctx = cv.getContext("2d");
+  let W = 0, H = 0, DPR = 1, raf = 0;
+  const view = { x: 0, y: 0, k: 1, inited: false };
+  const nodes = new Map();   // id -> {…node, x,y,vx,vy,alpha,r,tr,missed,dead}
+  let edges = [];
+  const GRACE = 2;           // polls a node may be missing before it ages out
+
+  function resize() {
+    DPR = window.devicePixelRatio || 1; W = cv.clientWidth; H = cv.clientHeight;
+    cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!view.inited && W > 0) { view.x = W / 2; view.y = H / 2; view.inited = true; }
+  }
+  function radius(rss) { return Math.max(7, Math.min(58, 7 + Math.sqrt(rss) * 1.5)); }
+
+  // emerge next to a connected, living neighbor — not from a random void
+  function spawnPos(id, edgs) {
+    for (const e of edgs) {
+      const other = e.src === id ? nodes.get(e.dst) : e.dst === id ? nodes.get(e.src) : null;
+      if (other && !other.dead) return { x: other.x + (Math.random() - .5) * 70, y: other.y + (Math.random() - .5) * 70 };
+    }
+    return { x: (Math.random() - .5) * 140, y: (Math.random() - .5) * 140 };
+  }
+
+  // Rebuild from a fresh SNAP. Same enter/age-out lifecycle as graph.html so the
+  // sim is stable across pushes.
+  function rebuild(snap) {
+    const incoming = new Map(snap.nodes.map(n => [n.id, n]));
+    for (const n of snap.nodes) {
+      let node = nodes.get(n.id);
+      if (node) { Object.assign(node, n); node.missed = 0; node.dead = false; node.tr = radius(n.rss_mb); }
+      else { const sp = spawnPos(n.id, snap.edges); nodes.set(n.id, { ...n, x: sp.x, y: sp.y, vx: 0, vy: 0, alpha: 0, r: 2, tr: radius(n.rss_mb), missed: 0, dead: false }); }
+    }
+    for (const node of nodes.values()) {
+      if (!incoming.has(node.id) && !node.dead) { node.missed = (node.missed || 0) + 1; if (node.missed >= GRACE) node.dead = true; }
+    }
+    edges = snap.edges;   // draw()/step() guard on node presence
+  }
+
+  function lifecycle() {
+    for (const [id, n] of nodes) {
+      if (n.tr != null) n.r += (n.tr - n.r) * 0.18;
+      if (n.dead) { n.alpha -= 0.05; n.r *= 0.93; if (n.alpha <= 0) { nodes.delete(id); if (SELECTED === id) select(null); } }
+      else if (n.alpha < 1) n.alpha = Math.min(1, n.alpha + 0.07);
+    }
+  }
+
+  function step() {
+    const c = cfg();
+    const arr = [...nodes.values()].filter(n => !n.dead);
+    for (let i = 0; i < arr.length; i++) {
+      const a = arr[i];
+      for (let j = i + 1; j < arr.length; j++) {
+        const b = arr[j];
+        let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 0.01;
+        const force = 2600 / d2, d = Math.sqrt(d2);
+        const fx = dx / d * force, fy = dy / d * force;
+        a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+      }
+      a.vx += (0 - a.x) * 0.004; a.vy += (0 - a.y) * 0.004;   // gravity to world center
+    }
+    for (const e of edges) {
+      const a = nodes.get(e.src), b = nodes.get(e.dst);
+      if (!a || !b || a.dead || b.dead) continue;
+      let dx = b.x - a.x, dy = b.y - a.y, d = Math.sqrt(dx * dx + dy * dy) + .01;
+      const f = (d - (90 + a.r + b.r)) * 0.012, fx = dx / d * f, fy = dy / d * f;
+      a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+    }
+    const moving = c.motion;
+    for (const a of arr) {
+      if (a === dragging) continue;
+      a.vx *= 0.86; a.vy *= 0.86;
+      if (moving) { a.x += a.vx; a.y += a.vy; }
+    }
+  }
+
+  function draw() {
+    const c = cfg(), sel = SELECTED;
+    ctx.clearRect(0, 0, W, H);
+    ctx.save(); ctx.translate(view.x, view.y); ctx.scale(view.k, view.k);
+    // edges (tcp accent, unix violet — themed)
+    for (const e of edges) {
+      const a = nodes.get(e.src), b = nodes.get(e.dst);
+      if (!a || !b) continue;
+      ctx.globalAlpha = Math.min(a.alpha, b.alpha) * (e.kind === "unix" ? .45 : .5);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+      ctx.strokeStyle = e.kind === "unix" ? c.edgeUnix : c.edgeTcp;
+      ctx.lineWidth = 1 / view.k * (e.kind === "unix" ? 1.2 : 1.6);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    // nodes
+    for (const n of nodes.values()) {
+      const heat = c.heat(n.cpu);
+      ctx.beginPath(); ctx.arc(n.x, n.y, Math.max(0, n.r), 0, 6.28);
+      ctx.fillStyle = heat;
+      ctx.globalAlpha = n.alpha * (n.id === sel ? 1 : .92);
+      ctx.fill();
+      if (n.id === sel) { ctx.lineWidth = 3 / view.k; ctx.strokeStyle = c.accent; ctx.stroke(); }
+      ctx.globalAlpha = n.alpha;
+      if (n.ports && n.ports.length) {
+        ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 3, 0, 6.28);
+        ctx.lineWidth = 2 / view.k;
+        ctx.strokeStyle = n.ports.some(p => p.scope === "all") ? "#f0883e" : "#3fb950";
+        ctx.stroke();
+      }
+      if (view.k > 0.45 || n.r > 22) {
+        ctx.fillStyle = c.fg; ctx.font = `${12 / view.k}px ${c.uiFont}`; ctx.textAlign = "center";
+        ctx.fillText(n.label, n.x, n.y + n.r + 13 / view.k);
+        if (n.ports && n.ports.length) {
+          ctx.fillStyle = c.fgDim; ctx.font = `${10 / view.k}px ${c.monoFont}`;
+          ctx.fillText(":" + n.ports.map(p => p.port).slice(0, 4).join(" :"), n.x, n.y + n.r + 26 / view.k);
+        }
+      }
+    }
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+
+  function frame() {
+    if (VIEW === "graph") {
+      if (W === 0 || cv.width === 0 || cv.clientWidth !== W || cv.clientHeight !== H) resize();
+      if (view.inited) { lifecycle(); step(); draw(); }
+    }
+    raf = requestAnimationFrame(frame);
+  }
+
+  // ── interaction (pan/zoom/drag/click) ──
+  let dragging = null, dragMoved = false, panning = false, last = { x: 0, y: 0 };
+  function toWorld(mx, my) { return { x: (mx - view.x) / view.k, y: (my - view.y) / view.k }; }
+  function hit(mx, my) { const w = toWorld(mx, my); let f = null; for (const n of nodes.values()) { if (n.dead) continue; const dx = w.x - n.x, dy = w.y - n.y; if (dx * dx + dy * dy <= n.r * n.r) f = n; } return f; }
+  cv.addEventListener("mousedown", e => {
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    const n = hit(mx, my); dragMoved = false;
+    if (n) dragging = n; else { panning = true; last = { x: mx, y: my }; }
+  });
+  window.addEventListener("mousemove", e => {
+    if (VIEW !== "graph") return;
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    if (dragging) { const w = toWorld(mx, my); dragging.x = w.x; dragging.y = w.y; dragging.vx = 0; dragging.vy = 0; dragMoved = true; }
+    else if (panning) { view.x += mx - last.x; view.y += my - last.y; last = { x: mx, y: my }; }
+  });
+  window.addEventListener("mouseup", () => {
+    if (dragging && !dragMoved) select(dragging.id);
+    dragging = null; panning = false;
+  });
+  cv.addEventListener("wheel", e => {
+    e.preventDefault(); const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    const f = e.deltaY < 0 ? 1.1 : 0.9;
+    view.x = mx - (mx - view.x) * f; view.y = my - (my - view.y) * f; view.k = Math.max(0.2, Math.min(4, view.k * f));
+  }, { passive: false });
+
+  resize();
+  const ro = new ResizeObserver(() => { resize(); if (view.inited) draw(); }); ro.observe(cv);
+  const kick = () => { if (W === 0 || cv.clientWidth !== W || cv.clientHeight !== H) resize(); if (view.inited) draw(); };
+  requestAnimationFrame(kick); setTimeout(kick, 0); setTimeout(kick, 130); setTimeout(kick, 420);
+  frame();
+
+  return { rebuild, kick };
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// List view — production-faithful table (port of ListView.swift + Theme.swift)
+// PLUS a per-process CPU-waveform SIGNAL column. Columns and grouping match the
+// native Table exactly:  Process · CPU% · RAM · Procs · Ports · Conns · Command,
+// with a SIGNAL waveform inserted right after Process so nothing from the old
+// "Pulse" tab is lost. The waveform is driven by the REAL rolling CPU-history
+// ring buffer per node (CPU_HIST), accumulated across pushes.
+// ─────────────────────────────────────────────────────────────────────────────
+const List = (function () {
   const head = document.getElementById("phead");
   const body = document.getElementById("pbody");
-  let sortKey = "cpu", dir = -1;
+  let sortKey = "cpu", dir = -1;          // default sort: CPU desc (like production)
   const open = new Set();
-  const waveCanvases = [];   // {cv, id} — repainted by the shared ticker
+  const waveCanvases = [];   // {cv, id, cpu} — repainted by the shared ticker
   let t = 0, raf = 0;
 
-  const COLS = [["label", "Process", "left", "0 0 232px"], ["signal", "Signal", "left", "1 1 auto"], ["cpu", "CPU", "right", "0 0 64px"], ["rss_mb", "RAM", "right", "0 0 76px"], ["links", "Links", "right", "0 0 52px"], ["ports", "Ports", "left", "0 0 150px"]];
+  // [key, header, align, flex, sortable]. "signal" is not sortable (waveform).
+  // Mirrors ListView.swift column order/widths; SIGNAL slots in after Process.
+  const COLS = [
+    ["label",   "Process", "left",  "0 0 232px", true],
+    ["signal",  "Signal",  "left",  "1 1 120px", false],
+    ["cpu",     "CPU %",   "right", "0 0 64px",  true],
+    ["rss_mb",  "RAM",     "right", "0 0 78px",  true],
+    ["procs",   "Procs",   "right", "0 0 52px",  true],
+    ["ports",   "Ports",   "left",  "0 0 150px", true],
+    ["conns",   "Conns",   "right", "0 0 56px",  true],
+    ["cmd",     "Command", "left",  "1 1 160px", true],
+  ];
 
-  function val(n, k) { return k === "links" ? n.conns : k === "ports" ? n.ports.length : n[k]; }
-  function sortBy(k) { if (sortKey === k) dir = -dir; else { sortKey = k; dir = k === "label" ? 1 : -1; } render(); }
+  // Sort accessors mirror Theme.swift's RowItem fields / ListView KeyPaths.
+  function val(n, k) {
+    if (k === "procs") return n.pids ? n.pids.length : 0;
+    if (k === "ports") return n.ports ? n.ports.length : 0;
+    if (k === "conns") return n.conns || 0;
+    return n[k];
+  }
+  function sortBy(k) {
+    if (sortKey === k) dir = -dir;
+    else { sortKey = k; dir = (k === "label" || k === "cmd" || k === "ports") ? 1 : -1; }
+    render();
+  }
 
   // Paint one CPU waveform from the node's real history ring buffer. Falls back
   // to the current cpu value (flat) until enough samples accumulate.
@@ -488,7 +688,7 @@ const Pulse = (function () {
 
   function tick() {
     t += 0.045;
-    if (VIEW === "pulse") {
+    if (VIEW === "list") {
       const c = cfg();
       for (const wc of waveCanvases) paintWave(c, wc.cv, wc.id, wc.cpu);
     }
@@ -500,14 +700,14 @@ const Pulse = (function () {
     const c = cfg(), d = c.density;
     const conns = connCounts(SNAP);
     const rows = SNAP.nodes.map(n => ({ ...n, conns: conns[n.id] || 0 }));
-    rows.sort((a, b) => { let x = val(a, sortKey), y = val(b, sortKey); return typeof x === "string" ? dir * x.localeCompare(y) : dir * ((x || 0) - (y || 0)); });
+    rows.sort((a, b) => { let x = val(a, sortKey), y = val(b, sortKey); return typeof x === "string" ? dir * (x || "").localeCompare(y || "") : dir * ((x || 0) - (y || 0)); });
 
     head.style.gap = d.padX + "px";
     head.style.padding = `${d.headPadY}px ${d.padX + 4}px`;
     head.style.fontSize = d.label + "px";
-    head.innerHTML = COLS.map(([k, name, al, fl]) => {
-      const arr = sortKey === k ? `<span class="arr">${dir < 0 ? "↓" : "↑"}</span>` : "";
-      return `<div data-sort="${k === "signal" ? "" : k}" style="flex:${fl};text-align:${al};${k === "signal" ? "cursor:default;" : ""}">${name}${arr}</div>`;
+    head.innerHTML = COLS.map(([k, name, al, fl, sortable]) => {
+      const arr = (sortable && sortKey === k) ? `<span class="arr">${dir < 0 ? "↓" : "↑"}</span>` : "";
+      return `<div data-sort="${sortable ? k : ""}" style="flex:${fl};text-align:${al};${sortable ? "" : "cursor:default;"}">${name}${arr}</div>`;
     }).join("");
     head.querySelectorAll("[data-sort]").forEach(el => { const k = el.getAttribute("data-sort"); if (k) el.onclick = () => sortBy(k); });
 
@@ -516,7 +716,7 @@ const Pulse = (function () {
     for (const n of rows) {
       const can = n.children && n.children.length > 1, isOpen = open.has(n.id);
       frag.appendChild(rowEl(c, d, n, false, can, isOpen));
-      if (can && isOpen) for (const ch of n.children) frag.appendChild(rowEl(c, d, { ...ch, ports: [], conns: 0, kind: "child", id: n.id + "#" + ch.pid }, true, false, false));
+      if (can && isOpen) for (const ch of n.children) frag.appendChild(rowEl(c, d, { ...ch, ports: [], conns: 0, pids: [ch.pid], kind: "child", id: n.id + "#" + ch.pid }, true, false, false));
     }
     body.innerHTML = ""; body.appendChild(frag);
   }
@@ -530,38 +730,49 @@ const Pulse = (function () {
     const heat = c.heat(n.cpu);
     const waveH = child ? 18 : Math.min(34, d.rowH);
 
+    // ── Process (label + caret + group count) ──
     const name = document.createElement("div");
     name.style.cssText = `flex:0 0 232px;min-width:0;display:flex;align-items:center;${child ? "padding-left:24px;" : ""}`;
     let caretHTML = "";
     if (!child) caretHTML = `<span class="caret" style="width:15px;${can ? "cursor:pointer;" : ""}">${can ? (isOpen ? "▾" : "▸") : ""}</span>`;
-    name.innerHTML = `${caretHTML}<span class="dot" style="width:8px;height:8px;background:${heat};margin-right:10px;box-shadow:0 0 7px ${heat}"></span>` +
+    name.innerHTML = `${caretHTML}<span class="dot" style="width:8px;height:8px;background:${heat};margin-right:10px;box-shadow:0 0 7px ${heat};${child ? "opacity:0;" : ""}"></span>` +
       `<span class="pname" style="font-weight:${child ? 400 : 600};font-size:${d.data}px;color:${child ? "var(--fg-dim)" : "var(--fg)"}">${esc(n.label)}` +
       `${child ? `<span class="hfaint"> #${n.pid}</span>` : (n.kind === "app" ? `<span class="hfaint"> ·${n.pids.length}</span>` : "")}</span>`;
     if (!child && can) { const car = name.querySelector(".caret"); car.onclick = (e) => { e.stopPropagation(); open.has(n.id) ? open.delete(n.id) : open.add(n.id); render(); }; }
     row.appendChild(name);
 
+    // ── Signal (CPU waveform — the preserved Pulse trace) ──
     const sigWrap = document.createElement("div");
-    sigWrap.style.cssText = "flex:1 1 auto;min-width:90px;";
+    sigWrap.style.cssText = "flex:1 1 120px;min-width:90px;";
     const wcv = document.createElement("canvas");
     wcv.style.cssText = `display:block;width:100%;height:${waveH}px;`;
     sigWrap.appendChild(wcv); row.appendChild(sigWrap);
     waveCanvases.push({ cv: wcv, id: child ? null : n.id, cpu: n.cpu });
 
+    // ── CPU % (heat-pill on the value when >= 1, like ListView.swift) ──
     const cpuCell = document.createElement("div");
-    cpuCell.className = "num"; cpuCell.style.cssText = `flex:0 0 64px;font-size:${d.data}px;color:${n.cpu >= 1 ? "var(--fg)" : "var(--fg-faint)"}`;
-    cpuCell.textContent = n.cpu.toFixed(1); row.appendChild(cpuCell);
+    cpuCell.className = "num"; cpuCell.style.cssText = `flex:0 0 64px;font-size:${d.data}px;`;
+    if (n.cpu >= 1) {
+      cpuCell.innerHTML = `<span class="cpupill" style="background:${heat}">${n.cpu.toFixed(1)}</span>`;
+    } else {
+      cpuCell.style.color = "var(--fg-faint)"; cpuCell.textContent = n.cpu.toFixed(1);
+    }
+    row.appendChild(cpuCell);
 
+    // ── RAM ──
     const ramCell = document.createElement("div");
-    ramCell.className = "num"; ramCell.style.cssText = `flex:0 0 76px;font-size:${d.data}px;color:var(--fg-dim)`;
+    ramCell.className = "num"; ramCell.style.cssText = `flex:0 0 78px;font-size:${d.data}px;color:var(--fg-dim)`;
     ramCell.textContent = fmtMB(n.rss_mb); row.appendChild(ramCell);
 
-    const linkCell = document.createElement("div");
-    linkCell.className = "num"; linkCell.style.cssText = `flex:0 0 52px;font-size:${d.data}px;color:var(--fg-dim)`;
-    linkCell.textContent = child ? "" : (n.conns || ""); row.appendChild(linkCell);
+    // ── Procs ──
+    const procCell = document.createElement("div");
+    procCell.className = "num"; procCell.style.cssText = `flex:0 0 52px;font-size:${d.data}px;color:var(--fg-dim)`;
+    procCell.textContent = child ? "" : String(n.pids ? n.pids.length : 0); row.appendChild(procCell);
 
+    // ── Ports (chips with ⚠ on scope:"all") ──
     const portCell = document.createElement("div");
     portCell.style.cssText = "flex:0 0 150px;min-width:0;";
-    if (child || n.ports.length === 0) {
+    if (child || !n.ports || n.ports.length === 0) {
       portCell.innerHTML = `<span class="hfaint" style="font-family:var(--mono);font-size:${d.data - 1}px">${child ? "" : "—"}</span>`;
     } else {
       const chips = n.ports.slice(0, 3).map(p => { const all = p.scope === "all"; return `<span class="pill ${all ? "all" : ""}" style="font-size:${d.data - 2}px">:${p.port}${all ? "⚠" : ""}</span>`; }).join("");
@@ -569,6 +780,16 @@ const Pulse = (function () {
       portCell.innerHTML = `<span style="display:inline-flex;gap:4px">${chips}${more}</span>`;
     }
     row.appendChild(portCell);
+
+    // ── Conns ──
+    const connCell = document.createElement("div");
+    connCell.className = "num"; connCell.style.cssText = `flex:0 0 56px;font-size:${d.data}px;color:var(--fg-dim)`;
+    connCell.textContent = child ? "" : (n.conns || ""); row.appendChild(connCell);
+
+    // ── Command (monospace, truncated) ──
+    const cmdCell = document.createElement("div");
+    cmdCell.style.cssText = `flex:1 1 160px;min-width:0;font-family:var(--mono);font-size:${d.data - 1}px;color:var(--fg-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
+    cmdCell.textContent = n.cmd || "—"; row.appendChild(cmdCell);
 
     if (!child) row.onclick = () => select(n.id);
     return row;
@@ -626,14 +847,17 @@ function renderStats() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Selection + view switching
 // ─────────────────────────────────────────────────────────────────────────────
-function select(id) { SELECTED = (id === SELECTED) ? null : id; renderHud(); if (VIEW === "pulse") Pulse.render(); }
+function select(id) { SELECTED = (id === SELECTED) ? null : id; renderHud(); if (VIEW === "list") List.render(); }
 
 function setView(v) {
   VIEW = v;
   document.querySelectorAll("#vtoggle button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
-  document.getElementById("orbit").classList.toggle("hide", v !== "orbit");
-  document.getElementById("pulse").classList.toggle("show", v === "pulse");
-  if (v === "pulse") Pulse.render(); else Orbit.kick();
+  document.getElementById("list").classList.toggle("show", v === "list");
+  document.getElementById("graph").classList.toggle("show", v === "graph");
+  document.getElementById("orbit").classList.toggle("show", v === "orbit");
+  if (v === "list") List.render();
+  else if (v === "graph") Graph.kick();
+  else Orbit.kick();
 }
 document.querySelectorAll("#vtoggle button").forEach(b => b.onclick = () => setView(b.dataset.view));
 
@@ -689,7 +913,7 @@ const Tweaks = (function () {
     bodyEl.appendChild(toggle("Animate", "motion"));
     bodyEl.appendChild(toggle("Comms flow", "flow"));
   }
-  function apply() { saveTweaks(); applyTheme(); build(); renderStats(); renderHud(); if (VIEW === "pulse") Pulse.render(); }
+  function apply() { saveTweaks(); applyTheme(); build(); renderStats(); renderHud(); if (VIEW === "list") List.render(); }
 
   fab.onclick = () => { panel.classList.add("open"); fab.classList.add("hide"); };
   document.getElementById("tweaks-close").onclick = () => { panel.classList.remove("open"); fab.classList.remove("hide"); };
@@ -718,8 +942,9 @@ function merge(snap) {
   SNAP = { nodes: snap.nodes || [], edges: snap.edges || [], hidden: snap.hidden || 0 };
   recordHistory(SNAP);
   Orbit.rebuild(SNAP);
+  Graph.rebuild(SNAP);
   renderStats();
-  if (VIEW === "pulse") Pulse.render();
+  if (VIEW === "list") List.render();
   if (SELECTED) { if (SNAP.nodes.some(n => n.id === SELECTED)) renderHud(); else select(null); }
 }
 
