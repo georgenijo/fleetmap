@@ -48,6 +48,7 @@ func tempColor(_ c: Double) -> Color {
     }
 }
 
+@MainActor
 func fleetOpenMainWindow() {
     NSApp.setActivationPolicy(.regular)
     NSApp.activate(ignoringOtherApps: true)
