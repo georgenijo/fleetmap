@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fleetmap // Orbit</title>
+<!--
+  fleetmap // Orbit — vanilla-JS port of the React design kit (Orbit.jsx,
+  Pulse.jsx, Hud.jsx, OrbitApp.jsx, theme.js, tweaks-panel.jsx).
+  FULLY OFFLINE & SELF-CONTAINED: no React, no Babel, no CDN, no webfonts.
+  Snapshots are pushed in over the WKWebView bridge: window.__push(jsonString).
+-->
+<style>
+  /* ── system font stacks (no downloaded webfonts) ─────────────────────────── */
+  :root {
+    --ui: -apple-system, system-ui, "Hanken Grotesk", sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --ease: cubic-bezier(.4,0,.2,1);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
+  body { font-family: var(--ui); color: var(--fg); }
+  #root { position: fixed; inset: 0; display: flex; flex-direction: column;
+    background: var(--bg); color: var(--fg); }
+
+  /* header ------------------------------------------------------------------- */
+  #hdr { display: flex; align-items: center; gap: 18px; padding: 9px 18px;
+    background: var(--glass); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line); z-index: 10; flex: 0 0 auto; }
+  .brand { display: flex; align-items: center; gap: 8px; }
+  .brand b { font-family: var(--ui); font-weight: 700; font-size: 15px; color: var(--fg); letter-spacing: .2px; }
+  .brand .sub { font-family: var(--mono); font-size: 10px; color: var(--fg-faint);
+    letter-spacing: 1px; margin-left: 2px; margin-top: 2px; }
+
+  .vtoggle { display: inline-flex; gap: 2px; padding: 2px; border-radius: 9px;
+    background: var(--panel-2); border: 1px solid var(--line); }
+  .vtoggle button { border: 0; cursor: pointer; padding: 4px 16px; border-radius: 7px;
+    font-family: var(--ui); font-size: 12.5px; font-weight: 500; background: transparent;
+    color: var(--fg-dim); transition: background .15s var(--ease), color .15s; }
+  .vtoggle button.on { font-weight: 600; background: var(--accent); color: #fff; box-shadow: var(--shadow-soft); }
+
+  #stats { margin-left: auto; display: flex; gap: 20px; }
+  .stat { display: flex; flex-direction: column; line-height: 1.1; }
+  .stat .v { font-family: var(--ui); font-weight: 700; font-size: 14px; color: var(--fg);
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .stat .l { font-family: var(--ui); font-size: 9px; font-weight: 600; letter-spacing: .6px;
+    text-transform: uppercase; color: var(--fg-faint); margin-top: 2px; }
+
+  /* stage -------------------------------------------------------------------- */
+  #stage { flex: 1; position: relative; min-height: 0; }
+  .view { position: absolute; inset: 0; }
+  #orbit canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  #orbit-hint { position: absolute; bottom: 12px; left: 16px; color: var(--fg-faint);
+    font-family: var(--mono); font-size: 11px; pointer-events: none; letter-spacing: .2px; }
+
+  /* pulse -------------------------------------------------------------------- */
+  #pulse { overflow: auto; background: var(--bg); display: none; }
+  #pulse.show { display: block; }
+  #orbit.hide { display: none; }
+  .phead { display: flex; align-items: center; position: sticky; top: 0; z-index: 2;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    font-family: var(--ui); font-weight: 600; letter-spacing: .4px;
+    text-transform: uppercase; color: var(--fg-dim); }
+  .phead > div { cursor: pointer; min-width: 0; }
+  .phead .arr { color: var(--accent); margin-left: 3px; }
+  .prow { display: flex; align-items: center; cursor: pointer; border-bottom: 1px solid var(--line-soft); }
+  .prow:hover { background: var(--panel-2); }
+  .prow.sel { background: color-mix(in srgb, var(--accent) 13%, transparent); }
+  .prow.kid { cursor: default; background: var(--panel-2); }
+  .prow .dot { border-radius: 50%; flex: 0 0 auto; }
+  .prow .caret { flex: 0 0 auto; color: var(--fg-faint); font-family: var(--mono); }
+  .prow .pname { font-family: var(--ui); overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; min-width: 0; }
+  .prow canvas { display: block; width: 100%; }
+  .prow .num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .pill { font-family: var(--mono); padding: 1px 7px; border-radius: 999px;
+    color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+  .pill.all { color: #f0883e; background: rgba(240,136,62,0.13); border-color: rgba(240,136,62,0.4); }
+
+  /* HUD ---------------------------------------------------------------------- */
+  #hud { position: absolute; top: 0; right: 0; height: 100%; width: 330px; z-index: 9;
+    box-sizing: border-box; background: var(--glass);
+    -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+    border-left: 1px solid var(--line); padding: 18px 20px; overflow: auto;
+    color: var(--fg); font-family: var(--mono); transform: translateX(106%);
+    transition: transform .28s var(--ease); }
+  #hud.open { transform: none; box-shadow: var(--shadow); }
+  #hud .hhead { display: flex; align-items: center; gap: 10px; }
+  #hud .hdot { width: 11px; height: 11px; border-radius: 50%; flex: 0 0 auto; }
+  #hud .htitle { font-family: var(--ui); font-weight: 700; font-size: 17px; color: var(--fg); word-break: break-all; }
+  #hud .hmeta { color: var(--fg-dim); font-size: 11px; letter-spacing: .5px; }
+  #hud .hx { cursor: pointer; color: var(--fg-faint); font-size: 15px; padding: 2px; margin-left: auto; }
+  .hkey { display: flex; align-items: center; gap: 8px; color: var(--fg-faint);
+    margin: 16px 0 8px; font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+    text-transform: uppercase; }
+  .hkey i { flex: 1; height: 1px; background: var(--line); }
+  .hcards { display: flex; gap: 9px; }
+  .hcard { flex: 1; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 9px 11px; }
+  .hcard .ck { font-size: 9px; letter-spacing: 1px; color: var(--fg-faint); }
+  .hcard .cv { font-size: 17px; color: var(--fg); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .hcard .cu { font-size: 10px; color: var(--fg-faint); margin-left: 2px; }
+  .hports { display: flex; flex-wrap: wrap; gap: 5px; }
+  .hcmd { background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; white-space: pre-wrap; word-break: break-all; color: var(--accent);
+    font-size: 12px; line-height: 1.5; }
+  .hsock { color: var(--fg-dim); word-break: break-all; font-size: 12px; margin-bottom: 3px; }
+  .hchild { display: flex; justify-content: space-between; padding: 5px 0;
+    border-bottom: 1px solid var(--line-soft); font-size: 12px; }
+  .hchild .cdim { color: var(--fg-dim); }
+  .hfaint { color: var(--fg-faint); }
+
+  /* tweaks panel ------------------------------------------------------------- */
+  #tweaks { position: fixed; right: 16px; bottom: 16px; z-index: 50; width: 232px;
+    background: var(--glass); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+    border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
+    font-family: var(--ui); font-size: 11.5px; color: var(--fg); overflow: hidden;
+    transform: translateY(8px); opacity: 0; pointer-events: none; transition: opacity .18s var(--ease), transform .18s var(--ease); }
+  #tweaks.open { transform: none; opacity: 1; pointer-events: auto; }
+  #tweaks .thd { display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 10px 10px 14px; border-bottom: 1px solid var(--line-soft); }
+  #tweaks .thd b { font-size: 12px; font-weight: 600; }
+  #tweaks .tx { border: 0; background: transparent; color: var(--fg-faint); width: 22px; height: 22px;
+    border-radius: 6px; cursor: pointer; font-size: 13px; }
+  #tweaks .tx:hover { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--fg); }
+  #tweaks .tbody { padding: 10px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .tsect { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--fg-faint); padding-top: 4px; }
+  .trow { display: flex; flex-direction: column; gap: 5px; }
+  .trow.h { flex-direction: row; align-items: center; justify-content: space-between; }
+  .tlbl { font-weight: 500; color: var(--fg-dim); }
+  .tseg { display: flex; padding: 2px; border-radius: 8px; background: var(--panel-2);
+    border: 1px solid var(--line); }
+  .tseg button { flex: 1; border: 0; background: transparent; color: var(--fg-dim);
+    font: inherit; font-weight: 500; min-height: 22px; border-radius: 6px; cursor: pointer;
+    padding: 4px 6px; }
+  .tseg button.on { background: var(--accent); color: #fff; font-weight: 600; }
+  .tchips { display: flex; gap: 6px; }
+  .tchip { flex: 1; height: 30px; border: 0; border-radius: 6px; cursor: pointer;
+    box-shadow: 0 0 0 .5px rgba(0,0,0,.2); transition: transform .12s var(--ease), box-shadow .12s; }
+  .tchip:hover { transform: translateY(-1px); }
+  .tchip.on { box-shadow: 0 0 0 2px var(--fg); }
+  .ttoggle { position: relative; width: 32px; height: 18px; border: 0; border-radius: 999px;
+    background: color-mix(in srgb, var(--fg) 22%, transparent); transition: background .15s; cursor: pointer; padding: 0; }
+  .ttoggle.on { background: #34c759; }
+  .ttoggle i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .15s; }
+  .ttoggle.on i { transform: translateX(14px); }
+  #tweaks-fab { position: fixed; right: 16px; bottom: 16px; z-index: 49; width: 34px; height: 34px;
+    border-radius: 10px; border: 1px solid var(--line); background: var(--glass);
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    color: var(--fg-dim); cursor: pointer; font-size: 15px; display: flex;
+    align-items: center; justify-content: center; box-shadow: var(--shadow-soft); }
+  #tweaks-fab:hover { color: var(--fg); }
+  #tweaks-fab.hide { display: none; }
+
+  /* scrollbars --------------------------------------------------------------- */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px;
+    border: 3px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--fg-faint); background-clip: padding-box; }
+</style>
+</head>
+<body>
+<div id="root">
+  <div id="hdr">
+    <div class="brand">
+      <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+        <circle cx="9" cy="9" r="2.6" fill="var(--accent)"/>
+        <ellipse cx="9" cy="9" rx="7.4" ry="3" stroke="var(--accent)" stroke-width="1.1" opacity="0.7" transform="rotate(28 9 9)"/>
+        <circle cx="15.2" cy="6.2" r="1.5" fill="var(--accent)"/>
+      </svg>
+      <b>fleetmap</b><span class="sub">// ORBIT</span>
+    </div>
+    <div class="vtoggle" id="vtoggle">
+      <button data-view="orbit" class="on">Orbit</button>
+      <button data-view="pulse">Pulse</button>
+    </div>
+    <div id="stats"></div>
+  </div>
+
+  <div id="stage">
+    <div id="orbit" class="view"><canvas id="ocv"></canvas><div id="orbit-hint">orbit · drag to pan · scroll to zoom · click a body</div></div>
+    <div id="pulse" class="view">
+      <div class="phead" id="phead"></div>
+      <div id="pbody"></div>
+    </div>
+    <div id="hud"></div>
+  </div>
+</div>
+
+<button id="tweaks-fab" title="Tweaks">⚙</button>
+<div id="tweaks">
+  <div class="thd"><b>Tweaks</b><button class="tx" id="tweaks-close">✕</button></div>
+  <div class="tbody" id="tweaks-body"></div>
+</div>
+
+<script>
+"use strict";
+// ─────────────────────────────────────────────────────────────────────────────
+// theme.js — design tokens (dark/light, accents, densities, heat ramp).
+// ─────────────────────────────────────────────────────────────────────────────
+const FN_TOKENS = {
+  themes: {
+    dark: {
+      "--bg": "#0c0e12", "--panel": "#14171d", "--panel-2": "#1a1e26",
+      "--raised": "#1f242d", "--line": "#272c36", "--line-soft": "#1b2027",
+      "--fg": "#e7eaf0", "--fg-dim": "#98a1b1", "--fg-faint": "#5d6675",
+      "--shadow": "0 12px 40px rgba(0,0,0,0.55)", "--shadow-soft": "0 2px 10px rgba(0,0,0,0.35)",
+      "--glass": "rgba(12,14,18,0.72)", "--grid": "rgba(255,255,255,0.022)", "--scrim": "rgba(0,0,0,0.45)",
+    },
+    light: {
+      "--bg": "#f5f6f8", "--panel": "#ffffff", "--panel-2": "#f1f3f6",
+      "--raised": "#ffffff", "--line": "#e4e7ec", "--line-soft": "#eef0f3",
+      "--fg": "#171a20", "--fg-dim": "#5e6777", "--fg-faint": "#9aa2b1",
+      "--shadow": "0 14px 44px rgba(23,33,54,0.14)", "--shadow-soft": "0 1px 4px rgba(23,33,54,0.08)",
+      "--glass": "rgba(255,255,255,0.72)", "--grid": "rgba(20,30,50,0.03)", "--scrim": "rgba(20,28,44,0.28)",
+    },
+  },
+  accents: { Iris: "#6366f1", Azure: "#2f81f7", Teal: "#13b8a6", Lime: "#7bc62d", Amber: "#f59e0b" },
+  densities: {
+    compact:     { rowH: 32, padX: 12, padY: 6,  data: 12,   label: 11, gap: 14, nodeLabel: 11, headPadY: 9 },
+    comfortable: { rowH: 44, padX: 18, padY: 10, data: 13.5, label: 12, gap: 22, nodeLabel: 13, headPadY: 13 },
+  },
+  // CPU heat ramp — green → amber → red, in HSL so it interpolates smoothly.
+  heat(cpu) { const c = Math.max(0, Math.min(100, cpu)); return `hsl(${138 * (1 - c / 100)} 68% 50%)`; },
+};
+
+const O_UI = '-apple-system, system-ui, "Hanken Grotesk", sans-serif';
+const O_MONO = 'ui-monospace, "SF Mono", Menlo, monospace';
+function oa(hex, a) { const h = hex.replace("#", ""); return `rgba(${parseInt(h.slice(0,2),16)},${parseInt(h.slice(2,4),16)},${parseInt(h.slice(4,6),16)},${a})`; }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// State — current snapshot, tweaks, selection, per-node CPU history.
+// ─────────────────────────────────────────────────────────────────────────────
+const DEFAULTS = { theme: "dark", accent: "#6366f1", density: "comfortable", motion: true, flow: true, bodyStyle: "orb" };
+let TW = loadTweaks();
+let SNAP = { nodes: [], edges: [], hidden: 0 };
+let VIEW = "orbit";
+let SELECTED = null;
+const CPU_HIST = new Map();   // id -> Float32 ring of last N cpu samples
+const HIST_LEN = 120;
+
+function loadTweaks() {
+  try { const raw = localStorage.getItem("fm.tweaks"); if (raw) return { ...DEFAULTS, ...JSON.parse(raw) }; } catch (e) {}
+  return { ...DEFAULTS };
+}
+function saveTweaks() { try { localStorage.setItem("fm.tweaks", JSON.stringify(TW)); } catch (e) {} }
+
+// Derived config object passed to the renderers (mirrors OrbitApp.jsx `cfg`).
+function cfg() {
+  const isLight = TW.theme === "light";
+  const dens = FN_TOKENS.densities[TW.density] || FN_TOKENS.densities.comfortable;
+  const theme = FN_TOKENS.themes[TW.theme] || FN_TOKENS.themes.dark;
+  return {
+    motion: TW.motion, flow: TW.flow, bodyStyle: TW.bodyStyle, density: dens, heat: FN_TOKENS.heat,
+    accent: TW.accent, isLight, nodeLabel: dens.nodeLabel, uiFont: O_UI, monoFont: O_MONO,
+    fg: theme["--fg"], fgDim: theme["--fg-dim"],
+    star: isLight ? "#36406a" : "#cdd6ff",
+    ring: isLight ? "rgba(20,30,60,0.10)" : "rgba(150,170,255,0.08)",
+    edgeTcp: oa(TW.accent, isLight ? 0.4 : 0.5), edgeUnix: oa("#8a7cf0", isLight ? 0.5 : 0.62),
+  };
+}
+
+// Apply theme tokens as CSS custom properties on :root, per the kit.
+function applyTheme() {
+  const theme = FN_TOKENS.themes[TW.theme] || FN_TOKENS.themes.dark;
+  const root = document.documentElement;
+  for (const k in theme) root.style.setProperty(k, theme[k]);
+  root.style.setProperty("--accent", TW.accent);
+}
+
+function connCounts(snap) { const c = {}; for (const e of snap.edges) { c[e.src] = (c[e.src] || 0) + 1; c[e.dst] = (c[e.dst] || 0) + 1; } return c; }
+function fmtMB(v) { return v >= 1024 ? (v / 1024).toFixed(1) + " GB" : v.toFixed(0) + " MB"; }
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Orbit view — Canvas2D star-system (faithful port of Orbit.jsx).
+// ─────────────────────────────────────────────────────────────────────────────
+function bodyR(rss) { return Math.max(7, Math.min(46, 7 + Math.sqrt(rss) * 1.25)); }
+function hashf(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return ((h >>> 0) % 1000) / 1000; }
+
+const Orbit = (function () {
+  const cv = document.getElementById("ocv");
+  const ctx = cv.getContext("2d");
+  const st = { nodes: new Map(), edges: [], view: null, stars: [], pan: false, last: { x: 0, y: 0 }, t: 0, click: null };
+  let DPR = 1, W = 0, H = 0, raf = 0;
+
+  // Rebuild orbital layout from a fresh snapshot. Hubs (most-connected) ride
+  // tight inner orbits; loners drift the rim. Preserves theta/omega for nodes
+  // that persist so motion is continuous across pushes.
+  function rebuild(snap) {
+    const prev = st.nodes;
+    const deg = {}; snap.edges.forEach(e => { deg[e.src] = (deg[e.src] || 0) + 1; deg[e.dst] = (deg[e.dst] || 0) + 1; });
+    const maxDeg = Math.max(1, ...Object.values(deg));
+    st.edges = snap.edges; st.nodes = new Map();
+    const tiers = {};
+    snap.nodes.forEach(n => { const d = deg[n.id] || 0; (tiers[d] = tiers[d] || []).push(n); });
+    snap.nodes.forEach(n => {
+      const d = deg[n.id] || 0;
+      const Rbase = 120 + (1 - d / maxDeg) * 360;            // hubs inner, loners outer
+      const R = Rbase + (hashf(n.id) - 0.5) * 60;
+      const tierArr = tiers[d]; const ti = tierArr.indexOf(n);
+      const theta0 = (ti / tierArr.length) * Math.PI * 2 + hashf(n.id + "x") * 0.7;
+      const omega = (0.0010 + n.cpu * 0.00004) * (190 / (R + 90));  // hot orbits faster
+      const old = prev.get(n.id);
+      st.nodes.set(n.id, { ...n, deg: d, R, theta: old ? old.theta : theta0, omega,
+        br: bodyR(n.rss_mb), alpha: old ? old.alpha : 0, spin: hashf(n.id + "s") * 6.28,
+        _sx: 0, _sy: 0, _sr: 0 });
+    });
+    if (!st.stars.length) {
+      st.stars = Array.from({ length: 150 }, () => ({ x: (Math.random() - .5) * 2400, y: (Math.random() - .5) * 1800, z: Math.random() * 0.8 + 0.2, p: Math.random() * 6.28 }));
+    }
+  }
+
+  function resize() {
+    DPR = window.devicePixelRatio || 1; W = cv.clientWidth; H = cv.clientHeight;
+    cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (!st.view && W > 0) st.view = { x: W / 2, y: H / 2, k: 1 };
+  }
+  function pos(n) { return { x: Math.cos(n.theta) * n.R, y: Math.sin(n.theta) * n.R }; }
+
+  function draw() {
+    if (!st.view) return;
+    const c = cfg(), v = st.view, sel = SELECTED; st.t += 0.016;
+    ctx.clearRect(0, 0, W, H);
+    // starfield (subtle parallax with pan)
+    for (const s of st.stars) {
+      const sx = ((s.x * s.z + v.x) % (W + 200) + (W + 200)) % (W + 200) - 100;
+      const sy = ((s.y * s.z + v.y) % (H + 200) + (H + 200)) % (H + 200) - 100;
+      const tw = c.motion ? (0.5 + 0.5 * Math.sin(st.t * 1.5 + s.p)) : 0.7;
+      ctx.globalAlpha = (c.isLight ? 0.18 : 0.5) * s.z * tw;
+      ctx.fillStyle = c.star; ctx.beginPath(); ctx.arc(sx, sy, s.z * 1.4, 0, 6.28); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.save(); ctx.translate(v.x, v.y); ctx.scale(v.k, v.k);
+
+    // orbit guide rings
+    ctx.strokeStyle = c.ring; ctx.lineWidth = 1 / v.k;
+    for (let r = 120; r <= 520; r += 100) { ctx.globalAlpha = 0.5; ctx.beginPath(); ctx.arc(0, 0, r, 0, 6.28); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+
+    // comm-links (bowed toward core; tcp accent solid, unix violet dashed; flow dash)
+    for (const e of st.edges) {
+      const a = st.nodes.get(e.src), b = st.nodes.get(e.dst); if (!a || !b) continue;
+      const pa = pos(a), pb = pos(b);
+      const mx = (pa.x + pb.x) / 2 * 0.82, my = (pa.y + pb.y) / 2 * 0.82;
+      const lit = sel && (e.src === sel || e.dst === sel);
+      ctx.globalAlpha = Math.min(a.alpha, b.alpha) * (lit ? 1 : (sel ? 0.10 : 0.4));
+      ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.quadraticCurveTo(mx, my, pb.x, pb.y);
+      ctx.strokeStyle = e.kind === "unix" ? c.edgeUnix : (lit ? c.accent : c.edgeTcp);
+      ctx.lineWidth = (lit ? 2.4 : 1.4) / v.k;
+      if (c.flow && c.motion) { ctx.setLineDash([3 / v.k, 7 / v.k]); ctx.lineDashOffset = -st.t * (lit ? 60 : 34) / v.k; }
+      else ctx.setLineDash([]);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+
+    // core
+    const pulse = c.motion ? 1 + Math.sin(st.t * 2) * 0.06 : 1;
+    ctx.save(); ctx.shadowColor = c.accent; ctx.shadowBlur = 26;
+    ctx.beginPath(); ctx.arc(0, 0, 16 * pulse, 0, 6.28); ctx.fillStyle = c.accent; ctx.globalAlpha = 0.95; ctx.fill(); ctx.restore();
+    ctx.globalAlpha = 0.5; ctx.lineWidth = 1.5 / v.k; ctx.strokeStyle = c.accent;
+    ctx.beginPath(); ctx.arc(0, 0, 26 * pulse, 0, 6.28); ctx.stroke();
+    ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.font = `600 10px ${c.uiFont}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("◆", 0, 0);
+    ctx.fillStyle = c.fgDim; ctx.font = `10px ${c.monoFont}`; ctx.fillText("fleet core", 0, 40);
+
+    // bodies
+    for (const n of st.nodes.values()) {
+      const p = pos(n), heat = c.heat(n.cpu), isSel = n.id === sel;
+      const dim = sel && !isSel && !st.edges.some(e => (e.src === sel && e.dst === n.id) || (e.dst === sel && e.src === n.id));
+      ctx.globalAlpha = n.alpha * (dim ? 0.22 : 1);
+      const r = n.br * (isSel && c.motion ? 1 + Math.sin(st.t * 4) * 0.06 : 1);
+      const allPort = n.ports && n.ports.some(pp => pp.scope === "all");
+
+      if (c.bodyStyle === "pip") {
+        ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(3, r * 0.5), 0, 6.28); ctx.fillStyle = heat; ctx.fill();
+      } else if (c.bodyStyle === "reactor") {
+        ctx.lineWidth = 2.2; ctx.strokeStyle = heat;
+        ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 6.28); ctx.globalAlpha = n.alpha * (dim ? 0.22 : 0.9); ctx.stroke();
+        ctx.beginPath(); ctx.arc(p.x, p.y, r, n.spin + st.t * (c.motion ? 1.4 : 0), n.spin + st.t * (c.motion ? 1.4 : 0) + 1.4); ctx.lineWidth = 3; ctx.stroke();
+        ctx.globalAlpha = n.alpha * (dim ? 0.22 : 1); ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(2, r * 0.32), 0, 6.28); ctx.fillStyle = heat; ctx.fill();
+      } else {
+        ctx.save(); ctx.shadowColor = heat; ctx.shadowBlur = isSel ? 26 : 14;
+        const g = ctx.createRadialGradient(p.x - r * .3, p.y - r * .35, r * .15, p.x, p.y, r);
+        g.addColorStop(0, c.isLight ? heat : "rgba(255,255,255,0.55)"); g.addColorStop(0.25, heat); g.addColorStop(1, heat);
+        ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 6.28); ctx.fillStyle = g; ctx.fill(); ctx.restore();
+      }
+      // port halo (orange ring on scope:"all")
+      if (allPort && c.bodyStyle !== "reactor") { ctx.globalAlpha = n.alpha * (dim ? 0.2 : 0.9); ctx.beginPath(); ctx.arc(p.x, p.y, r + 4, 0, 6.28); ctx.lineWidth = 1.4; ctx.strokeStyle = "#f0883e"; ctx.stroke(); }
+      // selection ring
+      if (isSel) { ctx.globalAlpha = n.alpha; ctx.beginPath(); ctx.arc(p.x, p.y, r + 7, 0, 6.28); ctx.lineWidth = 2 / v.k; ctx.strokeStyle = c.accent; ctx.stroke(); }
+      // label
+      const showLabel = isSel || (!dim && (n.br > 16 || v.k > 1.15));
+      if (showLabel) {
+        ctx.globalAlpha = n.alpha * (dim ? 0.3 : 1); ctx.fillStyle = c.fg; ctx.font = `500 ${c.nodeLabel}px ${c.uiFont}`; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+        ctx.fillText(n.label, p.x, p.y + r + 13);
+        if (isSel && n.ports.length) { ctx.fillStyle = allPort ? "#f0883e" : c.fgDim; ctx.font = `${c.nodeLabel - 1}px ${c.monoFont}`; ctx.fillText(":" + n.ports.map(pp => pp.port).slice(0, 3).join(" :"), p.x, p.y + r + 13 + c.nodeLabel + 2); }
+      }
+      n._sx = v.x + p.x * v.k; n._sy = v.y + p.y * v.k; n._sr = r * v.k;
+    }
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+
+  function step() { const c = cfg(); for (const n of st.nodes.values()) { if (c.motion) n.theta += n.omega; if (n.alpha < 1) n.alpha = Math.min(1, n.alpha + (c.motion ? 0.05 : 1)); } }
+  function frame() { if (W === 0 || cv.width === 0 || cv.clientWidth !== W || cv.clientHeight !== H) resize(); if (st.view) { step(); draw(); } raf = requestAnimationFrame(frame); }
+
+  function hit(mx, my) { let f = null; for (const n of st.nodes.values()) { const dx = mx - n._sx, dy = my - n._sy, rr = Math.max(n._sr + 6, 12); if (dx * dx + dy * dy <= rr * rr) f = n; } return f; }
+  function down(ev) { const r = cv.getBoundingClientRect(), n = hit(ev.clientX - r.left, ev.clientY - r.top); if (n) { st.click = n; } else { st.pan = true; st.last = { x: ev.clientX, y: ev.clientY }; } }
+  function move(ev) { if (st.pan && st.view) { st.view.x += ev.clientX - st.last.x; st.view.y += ev.clientY - st.last.y; st.last = { x: ev.clientX, y: ev.clientY }; } }
+  function up() { if (st.click) select(st.click.id); st.click = null; st.pan = false; }
+  function wheel(ev) { ev.preventDefault(); if (!st.view) return; const r = cv.getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top, f = ev.deltaY < 0 ? 1.08 : 0.92; st.view.x = mx - (mx - st.view.x) * f; st.view.y = my - (my - st.view.y) * f; st.view.k = Math.max(0.4, Math.min(3, st.view.k * f)); }
+
+  // wiring
+  resize();
+  const ro = new ResizeObserver(() => { resize(); if (st.view) draw(); }); ro.observe(cv);
+  // cold-load hardening — paint full frames from timers too (WKWebView can pause
+  // rAF after one frame; layout box can be 0 at mount).
+  const kick = () => { if (W === 0 || cv.clientWidth !== W || cv.clientHeight !== H) resize(); if (st.view) draw(); };
+  requestAnimationFrame(kick); setTimeout(kick, 0); setTimeout(kick, 130); setTimeout(kick, 420);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(kick);
+  cv.addEventListener("mousedown", down); window.addEventListener("mousemove", move); window.addEventListener("mouseup", up); cv.addEventListener("wheel", wheel, { passive: false });
+  frame();
+
+  return { rebuild, kick };
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pulse view — per-process CPU waveform (port of Pulse.jsx). Waveform is driven
+// by a REAL rolling CPU-history ring buffer per node, accumulated across pushes.
+// ─────────────────────────────────────────────────────────────────────────────
+const Pulse = (function () {
+  const head = document.getElementById("phead");
+  const body = document.getElementById("pbody");
+  let sortKey = "cpu", dir = -1;
+  const open = new Set();
+  const waveCanvases = [];   // {cv, id} — repainted by the shared ticker
+  let t = 0, raf = 0;
+
+  const COLS = [["label", "Process", "left", "0 0 232px"], ["signal", "Signal", "left", "1 1 auto"], ["cpu", "CPU", "right", "0 0 64px"], ["rss_mb", "RAM", "right", "0 0 76px"], ["links", "Links", "right", "0 0 52px"], ["ports", "Ports", "left", "0 0 150px"]];
+
+  function val(n, k) { return k === "links" ? n.conns : k === "ports" ? n.ports.length : n[k]; }
+  function sortBy(k) { if (sortKey === k) dir = -dir; else { sortKey = k; dir = k === "label" ? 1 : -1; } render(); }
+
+  // Paint one CPU waveform from the node's real history ring buffer. Falls back
+  // to the current cpu value (flat) until enough samples accumulate.
+  function paintWave(c, cvEl, id, cpu) {
+    const ctx = cvEl.getContext("2d");
+    const DPR = window.devicePixelRatio || 1;
+    const w = cvEl.clientWidth, hh = cvEl.clientHeight;
+    if (!w || !hh) return;
+    if (cvEl.width !== w * DPR || cvEl.height !== hh * DPR) { cvEl.width = w * DPR; cvEl.height = hh * DPR; }
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.clearRect(0, 0, w, hh);
+    const hist = CPU_HIST.get(id);
+    const heat = c.heat(cpu), mid = hh / 2;
+    const pts = [];
+    const N = Math.max(2, Math.floor(w / 3));
+    const scroll = c.motion ? (t * 18) : 0;   // px the buffer has scrolled left
+    for (let i = 0; i <= N; i++) {
+      const x = (i / N) * w;
+      // sample the history buffer right-aligned (newest at the right edge),
+      // scrolling left over time so the trace appears to flow.
+      let cpuv = cpu;
+      if (hist && hist.len > 1) {
+        const samplePos = (i / N) * (hist.len - 1) - (scroll / w) * (hist.len - 1);
+        const idx = ((Math.round(samplePos) % hist.len) + hist.len) % hist.len;
+        const ring = (hist.start + idx) % hist.cap;
+        cpuv = hist.buf[ring];
+      }
+      const amp = (0.06 + Math.min(1, cpuv / 100) * 0.84) * (hh / 2 - 2);
+      // small high-freq shimmer so flat traces still read as "live"
+      const jitter = c.motion ? Math.sin(x * 0.25 + t * (0.7 + cpuv / 90) + i) * amp * 0.10 : 0;
+      const y = mid - (cpuv / 100) * (hh - 4) + (hh / 2 - amp - 2) + jitter;
+      pts.push([x, Math.max(2, Math.min(hh - 2, y))]);
+    }
+    // fill under curve
+    const grad = ctx.createLinearGradient(0, 0, 0, hh);
+    grad.addColorStop(0, heat.replace(")", " / 0.34)")); grad.addColorStop(1, heat.replace(")", " / 0)"));
+    ctx.beginPath(); ctx.moveTo(0, hh); pts.forEach(([x, y]) => ctx.lineTo(x, y)); ctx.lineTo(w, hh); ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+    // line
+    ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.strokeStyle = heat; ctx.lineWidth = 1.6; ctx.lineJoin = "round"; ctx.stroke();
+    // leading dot
+    if (pts.length) { const [lx, ly] = pts[pts.length - 1]; ctx.beginPath(); ctx.arc(lx, ly, 2.4, 0, 6.28); ctx.fillStyle = heat; ctx.fill(); }
+  }
+
+  function tick() {
+    t += 0.045;
+    if (VIEW === "pulse") {
+      const c = cfg();
+      for (const wc of waveCanvases) paintWave(c, wc.cv, wc.id, wc.cpu);
+    }
+    raf = requestAnimationFrame(tick);
+  }
+  raf = requestAnimationFrame(tick);
+
+  function render() {
+    const c = cfg(), d = c.density;
+    const conns = connCounts(SNAP);
+    const rows = SNAP.nodes.map(n => ({ ...n, conns: conns[n.id] || 0 }));
+    rows.sort((a, b) => { let x = val(a, sortKey), y = val(b, sortKey); return typeof x === "string" ? dir * x.localeCompare(y) : dir * ((x || 0) - (y || 0)); });
+
+    head.style.gap = d.padX + "px";
+    head.style.padding = `${d.headPadY}px ${d.padX + 4}px`;
+    head.style.fontSize = d.label + "px";
+    head.innerHTML = COLS.map(([k, name, al, fl]) => {
+      const arr = sortKey === k ? `<span class="arr">${dir < 0 ? "↓" : "↑"}</span>` : "";
+      return `<div data-sort="${k === "signal" ? "" : k}" style="flex:${fl};text-align:${al};${k === "signal" ? "cursor:default;" : ""}">${name}${arr}</div>`;
+    }).join("");
+    head.querySelectorAll("[data-sort]").forEach(el => { const k = el.getAttribute("data-sort"); if (k) el.onclick = () => sortBy(k); });
+
+    waveCanvases.length = 0;
+    const frag = document.createDocumentFragment();
+    for (const n of rows) {
+      const can = n.children && n.children.length > 1, isOpen = open.has(n.id);
+      frag.appendChild(rowEl(c, d, n, false, can, isOpen));
+      if (can && isOpen) for (const ch of n.children) frag.appendChild(rowEl(c, d, { ...ch, ports: [], conns: 0, kind: "child", id: n.id + "#" + ch.pid }, true, false, false));
+    }
+    body.innerHTML = ""; body.appendChild(frag);
+  }
+
+  function rowEl(c, d, n, child, can, isOpen) {
+    const row = document.createElement("div");
+    row.className = "prow" + (child ? " kid" : "") + (!child && n.id === SELECTED ? " sel" : "");
+    row.style.gap = d.padX + "px";
+    row.style.padding = `0 ${d.padX + 4}px`;
+    row.style.height = (child ? d.rowH - 6 : d.rowH + 8) + "px";
+    const heat = c.heat(n.cpu);
+    const waveH = child ? 18 : Math.min(34, d.rowH);
+
+    const name = document.createElement("div");
+    name.style.cssText = `flex:0 0 232px;min-width:0;display:flex;align-items:center;${child ? "padding-left:24px;" : ""}`;
+    let caretHTML = "";
+    if (!child) caretHTML = `<span class="caret" style="width:15px;${can ? "cursor:pointer;" : ""}">${can ? (isOpen ? "▾" : "▸") : ""}</span>`;
+    name.innerHTML = `${caretHTML}<span class="dot" style="width:8px;height:8px;background:${heat};margin-right:10px;box-shadow:0 0 7px ${heat}"></span>` +
+      `<span class="pname" style="font-weight:${child ? 400 : 600};font-size:${d.data}px;color:${child ? "var(--fg-dim)" : "var(--fg)"}">${esc(n.label)}` +
+      `${child ? `<span class="hfaint"> #${n.pid}</span>` : (n.kind === "app" ? `<span class="hfaint"> ·${n.pids.length}</span>` : "")}</span>`;
+    if (!child && can) { const car = name.querySelector(".caret"); car.onclick = (e) => { e.stopPropagation(); open.has(n.id) ? open.delete(n.id) : open.add(n.id); render(); }; }
+    row.appendChild(name);
+
+    const sigWrap = document.createElement("div");
+    sigWrap.style.cssText = "flex:1 1 auto;min-width:90px;";
+    const wcv = document.createElement("canvas");
+    wcv.style.cssText = `display:block;width:100%;height:${waveH}px;`;
+    sigWrap.appendChild(wcv); row.appendChild(sigWrap);
+    waveCanvases.push({ cv: wcv, id: child ? null : n.id, cpu: n.cpu });
+
+    const cpuCell = document.createElement("div");
+    cpuCell.className = "num"; cpuCell.style.cssText = `flex:0 0 64px;font-size:${d.data}px;color:${n.cpu >= 1 ? "var(--fg)" : "var(--fg-faint)"}`;
+    cpuCell.textContent = n.cpu.toFixed(1); row.appendChild(cpuCell);
+
+    const ramCell = document.createElement("div");
+    ramCell.className = "num"; ramCell.style.cssText = `flex:0 0 76px;font-size:${d.data}px;color:var(--fg-dim)`;
+    ramCell.textContent = fmtMB(n.rss_mb); row.appendChild(ramCell);
+
+    const linkCell = document.createElement("div");
+    linkCell.className = "num"; linkCell.style.cssText = `flex:0 0 52px;font-size:${d.data}px;color:var(--fg-dim)`;
+    linkCell.textContent = child ? "" : (n.conns || ""); row.appendChild(linkCell);
+
+    const portCell = document.createElement("div");
+    portCell.style.cssText = "flex:0 0 150px;min-width:0;";
+    if (child || n.ports.length === 0) {
+      portCell.innerHTML = `<span class="hfaint" style="font-family:var(--mono);font-size:${d.data - 1}px">${child ? "" : "—"}</span>`;
+    } else {
+      const chips = n.ports.slice(0, 3).map(p => { const all = p.scope === "all"; return `<span class="pill ${all ? "all" : ""}" style="font-size:${d.data - 2}px">:${p.port}${all ? "⚠" : ""}</span>`; }).join("");
+      const more = n.ports.length > 3 ? `<span class="hfaint" style="font-family:var(--mono);font-size:${d.data - 2}px">+${n.ports.length - 3}</span>` : "";
+      portCell.innerHTML = `<span style="display:inline-flex;gap:4px">${chips}${more}</span>`;
+    }
+    row.appendChild(portCell);
+
+    if (!child) row.onclick = () => select(n.id);
+    return row;
+  }
+
+  return { render };
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mission HUD — slide-in inspector (port of Hud.jsx).
+// ─────────────────────────────────────────────────────────────────────────────
+function renderHud() {
+  const hud = document.getElementById("hud");
+  if (!SELECTED) { hud.classList.remove("open"); return; }
+  const c = cfg();
+  const base = SNAP.nodes.find(n => n.id === SELECTED);
+  if (!base) { hud.classList.remove("open"); return; }
+  const conns = connCounts(SNAP);
+  const node = { ...base, connCount: conns[SELECTED] || 0 };
+  const heat = c.heat(node.cpu);
+
+  const ports = node.ports.length
+    ? `<div class="hports">${node.ports.map(p => { const all = p.scope === "all"; return `<span class="pill ${all ? "all" : ""}" style="font-size:11.5px;padding:2px 9px">:${p.port}${all ? " ⚠ ALL" : ""}</span>`; }).join("")}</div>`
+    : `<span class="hfaint">none</span>`;
+  const cards = [["CPU", node.cpu.toFixed(1), "%"], ["MEM", fmtMB(node.rss_mb), ""], ["NET", String(node.connCount || 0), "lnk"]]
+    .map(([k, v, u]) => `<div class="hcard"><div class="ck">${k}</div><div class="cv">${v}<span class="cu">${u}</span></div></div>`).join("");
+  const socks = (node.sockets && node.sockets.length)
+    ? `<div class="hkey"><span>unix sockets</span><i></i></div>${node.sockets.map(s => `<div class="hsock">${esc(s)}</div>`).join("")}` : "";
+  const kids = (node.children && node.children.length > 1)
+    ? `<div class="hkey"><span>child processes</span><i></i></div>${node.children.map(ch => `<div class="hchild"><span>${esc(ch.label)} <span class="hfaint">#${ch.pid}</span></span><span class="cdim">${ch.cpu.toFixed(0)}% · ${fmtMB(ch.rss_mb)}</span></div>`).join("")}` : "";
+
+  hud.innerHTML =
+    `<div class="hhead"><span class="hdot" style="background:${heat};box-shadow:0 0 12px ${heat}"></span>` +
+    `<div style="flex:1;min-width:0"><div class="htitle">${esc(node.label)}</div>` +
+    `<div class="hmeta">${esc((node.kind || "").toUpperCase())} · ${node.pids.length} PROC${node.pids.length > 1 ? "S" : ""} · ${node.connCount || 0} LINKS</div></div>` +
+    `<span class="hx" id="hud-close">✕</span></div>` +
+    `<div class="hkey"><span>telemetry</span><i></i></div><div class="hcards">${cards}</div>` +
+    `<div class="hkey"><span>open ports</span><i></i></div>${ports}` +
+    `<div class="hkey"><span>command</span><i></i></div><div class="hcmd">${esc(node.cmd || "—")}</div>` +
+    socks + kids;
+  hud.classList.add("open");
+  const x = document.getElementById("hud-close"); if (x) x.onclick = () => select(null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stats header
+// ─────────────────────────────────────────────────────────────────────────────
+function renderStats() {
+  const cpu = SNAP.nodes.reduce((s, n) => s + n.cpu, 0);
+  const ram = SNAP.nodes.reduce((s, n) => s + n.rss_mb, 0) / 1024;
+  const items = [[String(SNAP.nodes.length), "nodes"], [cpu.toFixed(0) + "%", "cpu"], [ram.toFixed(1) + " GB", "ram"], [String(SNAP.hidden || 0), "hidden"]];
+  document.getElementById("stats").innerHTML = items.map(([v, l]) => `<div class="stat"><span class="v">${v}</span><span class="l">${l}</span></div>`).join("");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Selection + view switching
+// ─────────────────────────────────────────────────────────────────────────────
+function select(id) { SELECTED = (id === SELECTED) ? null : id; renderHud(); if (VIEW === "pulse") Pulse.render(); }
+
+function setView(v) {
+  VIEW = v;
+  document.querySelectorAll("#vtoggle button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
+  document.getElementById("orbit").classList.toggle("hide", v !== "orbit");
+  document.getElementById("pulse").classList.toggle("show", v === "pulse");
+  if (v === "pulse") Pulse.render(); else Orbit.kick();
+}
+document.querySelectorAll("#vtoggle button").forEach(b => b.onclick = () => setView(b.dataset.view));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tweaks panel — live theme/accent/density/body/motion/flow (vanilla DOM).
+// ─────────────────────────────────────────────────────────────────────────────
+const Tweaks = (function () {
+  const panel = document.getElementById("tweaks");
+  const fab = document.getElementById("tweaks-fab");
+  const bodyEl = document.getElementById("tweaks-body");
+
+  function seg(label, key, options) {
+    const row = document.createElement("div"); row.className = "trow";
+    row.innerHTML = `<div class="tlbl">${label}</div>`;
+    const seg = document.createElement("div"); seg.className = "tseg";
+    options.forEach(o => {
+      const b = document.createElement("button"); b.textContent = o; b.className = TW[key] === o ? "on" : "";
+      b.onclick = () => { TW[key] = o; apply(); };
+      seg.appendChild(b);
+    });
+    row.appendChild(seg); return row;
+  }
+  function chips(label, key, colors) {
+    const row = document.createElement("div"); row.className = "trow";
+    row.innerHTML = `<div class="tlbl">${label}</div>`;
+    const wrap = document.createElement("div"); wrap.className = "tchips";
+    colors.forEach(hex => {
+      const b = document.createElement("button"); b.className = "tchip" + (TW[key].toLowerCase() === hex.toLowerCase() ? " on" : "");
+      b.style.background = hex; b.title = hex;
+      b.onclick = () => { TW[key] = hex; apply(); };
+      wrap.appendChild(b);
+    });
+    row.appendChild(wrap); return row;
+  }
+  function toggle(label, key) {
+    const row = document.createElement("div"); row.className = "trow h";
+    row.innerHTML = `<div class="tlbl">${label}</div>`;
+    const t = document.createElement("button"); t.className = "ttoggle" + (TW[key] ? " on" : ""); t.innerHTML = "<i></i>";
+    t.onclick = () => { TW[key] = !TW[key]; apply(); };
+    row.appendChild(t); return row;
+  }
+  function sect(label) { const d = document.createElement("div"); d.className = "tsect"; d.textContent = label; return d; }
+
+  function build() {
+    bodyEl.innerHTML = "";
+    bodyEl.appendChild(sect("Theme"));
+    bodyEl.appendChild(seg("Mode", "theme", ["dark", "light"]));
+    bodyEl.appendChild(chips("Accent", "accent", Object.values(FN_TOKENS.accents)));
+    bodyEl.appendChild(sect("Display"));
+    bodyEl.appendChild(seg("Density", "density", ["compact", "comfortable"]));
+    bodyEl.appendChild(seg("Body", "bodyStyle", ["orb", "reactor", "pip"]));
+    bodyEl.appendChild(sect("Motion"));
+    bodyEl.appendChild(toggle("Animate", "motion"));
+    bodyEl.appendChild(toggle("Comms flow", "flow"));
+  }
+  function apply() { saveTweaks(); applyTheme(); build(); renderStats(); renderHud(); if (VIEW === "pulse") Pulse.render(); }
+
+  fab.onclick = () => { panel.classList.add("open"); fab.classList.add("hide"); };
+  document.getElementById("tweaks-close").onclick = () => { panel.classList.remove("open"); fab.classList.remove("hide"); };
+  build();
+  return { build };
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The bridge — snapshots pushed from the Swift host via window.__push(json).
+// ─────────────────────────────────────────────────────────────────────────────
+function recordHistory(snap) {
+  const live = new Set();
+  for (const n of snap.nodes) {
+    live.add(n.id);
+    let h = CPU_HIST.get(n.id);
+    if (!h) { h = { buf: new Float32Array(HIST_LEN), cap: HIST_LEN, start: 0, len: 0 }; CPU_HIST.set(n.id, h); }
+    const w = (h.start + h.len) % h.cap;
+    if (h.len < h.cap) { h.buf[w] = n.cpu; h.len++; }
+    else { h.buf[h.start] = n.cpu; h.start = (h.start + 1) % h.cap; }   // overwrite oldest
+  }
+  for (const id of CPU_HIST.keys()) if (!live.has(id)) CPU_HIST.delete(id);   // drop gone nodes
+}
+
+function merge(snap) {
+  // normalize: the wire model omits `hidden`; default to 0.
+  SNAP = { nodes: snap.nodes || [], edges: snap.edges || [], hidden: snap.hidden || 0 };
+  recordHistory(SNAP);
+  Orbit.rebuild(SNAP);
+  renderStats();
+  if (VIEW === "pulse") Pulse.render();
+  if (SELECTED) { if (SNAP.nodes.some(n => n.id === SELECTED)) renderHud(); else select(null); }
+}
+
+window.__push = function (snap) {
+  try { merge(typeof snap === "string" ? JSON.parse(snap) : snap); }
+  catch (e) { console.log("push parse error", e); }
+};
+
+// boot
+applyTheme();
+renderStats();
+setView("orbit");
+</script>
+</body>
+</html>

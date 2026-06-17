@@ -1,6 +1,21 @@
 import SwiftUI
 
 struct ContentView: View {
+    @AppStorage("ui.shell") private var shell: UIShell = .classic
+
+    var body: some View {
+        switch shell {
+        case .classic: ClassicShellView()
+        case .orbital: OrbitalShellView()
+                        .frame(minWidth: 820, minHeight: 520)
+                        .background(BackgroundView())
+        }
+    }
+}
+
+// The original native shell: header + List/Graph tabs. Untouched behavior —
+// when the flag is `classic`, the app is bit-for-bit what it was before.
+struct ClassicShellView: View {
     @EnvironmentObject var store: SnapshotStore
     @State private var pane: Pane = .list
 

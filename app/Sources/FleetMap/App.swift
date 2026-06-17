@@ -4,6 +4,31 @@ import AppKit
 @main
 struct FleetMapApp: App {
     @StateObject private var store = SnapshotStore()
+    // Live, reactive UI-shell flag. Flipping it (View menu / env / default) swaps
+    // the root instantly because ContentView reads the same @AppStorage key.
+    @AppStorage("ui.shell") private var shell: UIShell = .classic
+
+    init() {
+        FleetMapApp.resolveDefaultShell()
+    }
+
+    // Decide the *default* shell (the user can still override it from the View
+    // menu, which persists over this). Precedence:
+    //   1. FLEETMAP_UI=orbital|classic env var (hard override of the default)
+    //   2. dev bundle (id ends in ".dev") → default orbital
+    //   3. otherwise → default classic
+    // We use UserDefaults.register so a stored user choice always wins.
+    static func resolveDefaultShell() {
+        var fallback: UIShell = .classic
+        if (Bundle.main.bundleIdentifier ?? "").hasSuffix(".dev") {
+            fallback = .orbital
+        }
+        if let env = ProcessInfo.processInfo.environment["FLEETMAP_UI"],
+           let forced = UIShell(rawValue: env.lowercased()) {
+            fallback = forced
+        }
+        UserDefaults.standard.register(defaults: ["ui.shell": fallback.rawValue])
+    }
 
     var body: some Scene {
         Window("fleetmap", id: "main") {
@@ -17,6 +42,17 @@ struct FleetMapApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 980, height: 640)
+        .commands {
+            // Live toggle between the classic native shell and the orbital web
+            // shell. @AppStorage makes the switch reactive.
+            CommandGroup(after: .toolbar) {
+                Picker("Interface", selection: $shell) {
+                    ForEach(UIShell.allCases) { s in
+                        Text(s.title).tag(s)
+                    }
+                }
+            }
+        }
 
         MenuBarExtra {
             MenuBarView().environmentObject(store)
