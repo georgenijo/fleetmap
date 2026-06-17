@@ -31,9 +31,34 @@ final class WebPushCoordinator {
 func makeWebShell(resource: String, coordinator: WebPushCoordinator) -> WKWebView {
     let web = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
     web.setValue(false, forKey: "drawsBackground")   // let the vibrancy show through
-    if let url = Bundle.module.url(forResource: resource, withExtension: "html") {
+    if let url = webResourceURL(resource) {
         web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
     }
     coordinator.web = web
     return web
+}
+
+// Locate a bundled web asset (`<resource>.html`) resiliently.
+//
+// SwiftPM's generated `Bundle.module` accessor is built for a bare CLI: it looks
+// for `fleetmap_FleetMap.bundle` beside the executable (`Bundle.main.bundleURL`)
+// and, failing that, at a *hard-coded build-machine path*. Neither survives
+// repackaging into a `.app`: scripts/bundle.sh puts the resource bundle under
+// `Contents/Resources/`, and the baked build path points at the CI runner. So in
+// a downloaded build `Bundle.module` fatal-errors on first access. We therefore
+// resolve via `Bundle.main` (which *is* `Contents/Resources`-aware) and only fall
+// back to `Bundle.module` for `swift run`/tests, where it resolves cleanly and is
+// never reached from inside the app.
+private func webResourceURL(_ resource: String) -> URL? {
+    // .app: the SwiftPM resource bundle sits in Contents/Resources/.
+    if let nested = Bundle.main.url(forResource: "fleetmap_FleetMap", withExtension: "bundle"),
+       let url = Bundle(url: nested)?.url(forResource: resource, withExtension: "html") {
+        return url
+    }
+    // .app: web assets flattened directly into Contents/Resources/ (fallback layout).
+    if let url = Bundle.main.url(forResource: resource, withExtension: "html") {
+        return url
+    }
+    // swift run / swift test: SwiftPM's accessor finds the build-dir bundle.
+    return Bundle.module.url(forResource: resource, withExtension: "html")
 }
