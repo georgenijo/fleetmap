@@ -6,7 +6,7 @@ struct FleetMapApp: App {
     @StateObject private var store = SnapshotStore()
     // Live, reactive UI-shell flag. Flipping it (View menu / env / default) swaps
     // the root instantly because ContentView reads the same @AppStorage key.
-    @AppStorage("ui.shell") private var shell: UIShell = .classic
+    @AppStorage("ui.shell") private var shell: UIShell = .orbital
 
     init() {
         FleetMapApp.resolveDefaultShell()
@@ -15,14 +15,11 @@ struct FleetMapApp: App {
     // Decide the *default* shell (the user can still override it from the View
     // menu, which persists over this). Precedence:
     //   1. FLEETMAP_UI=orbital|classic env var (hard override of the default)
-    //   2. dev bundle (id ends in ".dev") → default orbital
-    //   3. otherwise → default classic
+    //   2. otherwise → default orbital (the classic native shell stays one
+    //      click away in the View menu)
     // We use UserDefaults.register so a stored user choice always wins.
     static func resolveDefaultShell() {
-        var fallback: UIShell = .classic
-        if (Bundle.main.bundleIdentifier ?? "").hasSuffix(".dev") {
-            fallback = .orbital
-        }
+        var fallback: UIShell = .orbital
         if let env = ProcessInfo.processInfo.environment["FLEETMAP_UI"],
            let forced = UIShell(rawValue: env.lowercased()) {
             fallback = forced
