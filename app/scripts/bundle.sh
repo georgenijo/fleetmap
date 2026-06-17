@@ -25,9 +25,10 @@ done
 # Developer ID distribution, so nested bundles are signed explicitly first.
 # Otherwise fall back to an ad-hoc signature — enough for launchd/AX locally.
 if [ -n "${SIGN_IDENTITY:-}" ]; then
-    while IFS= read -r -d '' nested; do
-        codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$nested"
-    done < <(find "$APP/Contents/Resources" -name '*.bundle' -print0)
+    # Sign only the .app. The nested SwiftPM resource bundle is resources-only
+    # (web assets, no Mach-O), so codesign rejects signing it as code
+    # ("bundle format unsuitable"); the app signature seals it as a sealed
+    # resource instead. --deep is intentionally avoided per Apple guidance.
     codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
     codesign --verify --strict --verbose=2 "$APP"
     echo "built + signed $APP ($SIGN_IDENTITY)"
