@@ -38,6 +38,17 @@ struct ListView: View {
             }
             .width(76)
 
+            TableColumn("GPU %", value: \.gpu) { r in
+                Text(String(format: "%.1f", r.gpu))
+                    .font(.system(.body, design: .rounded)).monospacedDigit()
+                    .foregroundStyle(r.gpu >= 1 ? .white : .secondary)
+                    .padding(.horizontal, 7).padding(.vertical, 1.5)
+                    .background(gpuColor(r.gpu).opacity(r.gpu >= 1 ? 1 : 0),
+                                in: RoundedRectangle(cornerRadius: 5))
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(76)
+
             TableColumn("RAM", value: \.rss) { r in
                 Text(fmtMB(r.rss)).monospacedDigit()
                     .frame(maxWidth: .infinity, alignment: .trailing)

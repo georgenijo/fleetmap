@@ -3,7 +3,12 @@ import AppKit
 
 @main
 struct FleetMapApp: App {
-    @StateObject private var store = SnapshotStore()
+    // The status item (live SoC/GPU/LAN readout) is owned by MenuBarController;
+    // the window scene and the controller share SnapshotStore.shared.
+    @NSApplicationDelegateAdaptor(MenuBarController.self) private var menuBar
+    @StateObject private var store = SnapshotStore.shared
+    @AppStorage("menuBarVisible") private var menuBarVisible = true
+
     // Live, reactive UI-shell flag. Flipping it (View menu / env / default) swaps
     // the root instantly because ContentView reads the same @AppStorage key.
     @AppStorage("ui.shell") private var shell: UIShell = .orbital
@@ -36,6 +41,7 @@ struct FleetMapApp: App {
                     NSApp.setActivationPolicy(.regular)
                     NSApp.activate(ignoringOtherApps: true)
                 }
+                .onChange(of: menuBarVisible) { _, visible in menuBar.setVisible(visible) }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 980, height: 640)
@@ -50,12 +56,5 @@ struct FleetMapApp: App {
                 }
             }
         }
-
-        MenuBarExtra {
-            MenuBarView().environmentObject(store)
-        } label: {
-            Image(systemName: "chart.bar.xaxis")
-        }
-        .menuBarExtraStyle(.window)
     }
 }

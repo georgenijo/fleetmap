@@ -19,7 +19,14 @@ struct Reading {
 
 public final class Collector {
     private var prevCPU: [Int32: UInt64] = [:]
+    private var prevGPU: [Int32: UInt64] = [:]
+    private var prevNetByIf: [String: (rx: UInt64, tx: UInt64)] = [:]
     private var prevWall: UInt64 = 0
+    private let timebase: mach_timebase_info_data_t = {
+        var t = mach_timebase_info_data_t()
+        mach_timebase_info(&t)
+        return t
+    }()
     public let minCPU: Double
     public let minMB: Double
 
@@ -45,11 +52,47 @@ public final class Collector {
         prevCPU = Dictionary(readings.map { ($0.pid, $0.cpuNS) }, uniquingKeysWith: { a, _ in a })
         prevWall = wall
 
+        // per-pid GPU%: GPU busy-time delta as a fraction of the wall interval — the
+        // same metric Activity Monitor reports. accumulatedGPUTime is in nanoseconds,
+        // so convert the mach wall delta to ns to match (CPU stays in mach units,
+        // where the timebase cancels; GPU does not, so we convert explicitly).
+        let gpuRaw = GPU.sampleByPID()
+        let devUtil = GPU.deviceUtilization()
+        let wallDeltaNs = Double(wallDelta) * Double(timebase.numer) / Double(timebase.denom)
+        var gpuPct: [Int32: Double] = [:]
+        if wallDeltaNs > 0 {
+            for (pid, cur) in gpuRaw {
+                let prev = prevGPU[pid] ?? 0
+                let d = cur >= prev ? Double(cur - prev) : 0
+                gpuPct[pid] = d / wallDeltaNs * 100
+            }
+        }
+        prevGPU = gpuRaw
+
+        // per-interface network throughput (bytes/sec) over the same wall interval
+        let secs = wallDeltaNs / 1e9
+        let haveNetBaseline = !prevNetByIf.isEmpty
+        var ifaces: [NetIface] = []
+        var rxBps = 0.0, txBps = 0.0
+        for f in NetThroughput.perInterface() {
+            var r = 0.0, t = 0.0
+            if haveNetBaseline, secs > 0, let p = prevNetByIf[f.name] {
+                if f.rx >= p.rx { r = Double(f.rx - p.rx) / secs }
+                if f.tx >= p.tx { t = Double(f.tx - p.tx) / secs }
+            }
+            if r > 0 || t > 0 { ifaces.append(NetIface(name: f.name, rx_bps: r, tx_bps: t)) }
+            rxBps += r; txBps += t
+            prevNetByIf[f.name] = (f.rx, f.tx)
+        }
+        ifaces.sort { ($0.rx_bps + $0.tx_bps) > ($1.rx_bps + $1.tx_bps) }
+
         let sock = scanSockets(readings.map { $0.pid })
-        let (nodes, pidToNode) = buildNodes(readings, cpu: cpuPct, sock: sock)
+        let (nodes, pidToNode) = buildNodes(readings, cpu: cpuPct, gpu: gpuPct, sock: sock)
         let visible = Set(nodes.map { $0.id })
         let edges = buildEdges(sock, pidToNode: pidToNode, visible: visible)
-        return Snapshot(ts: Int64(Date().timeIntervalSince1970), nodes: nodes, edges: edges, note: nil)
+        return Snapshot(ts: Int64(Date().timeIntervalSince1970), nodes: nodes, edges: edges,
+                        gpu_util: devUtil, soc_temp: Temp.averageSoC(),
+                        net_rx_bps: rxBps, net_tx_bps: txBps, net_ifaces: ifaces, note: nil)
     }
 
     // ---- libproc sampling ----
@@ -119,7 +162,7 @@ public final class Collector {
 
     // ---- aggregate readings into grouped nodes ----
 
-    private func buildNodes(_ readings: [Reading], cpu: [Int32: Double], sock: SockData) -> ([Node], [Int32: String]) {
+    private func buildNodes(_ readings: [Reading], cpu: [Int32: Double], gpu: [Int32: Double], sock: SockData) -> ([Node], [Int32: String]) {
         var byID: [String: Node] = [:]
         var order: [String] = []
         var pidToNode: [Int32: String] = [:]
@@ -129,20 +172,22 @@ public final class Collector {
             let (id, label, kind) = identify(exe: exe, comm: r.comm)
             pidToNode[r.pid] = id
             let cpuV = cpu[r.pid] ?? 0
+            let gpuV = gpu[r.pid] ?? 0
             let rssMB = Double(r.rssBytes) / 1_048_576.0
             let cmd = redact(exe)
 
             if byID[id] == nil {
-                byID[id] = Node(id: id, label: label, kind: kind, cpu: 0, rss_mb: 0,
+                byID[id] = Node(id: id, label: label, kind: kind, cpu: 0, gpu: 0, rss_mb: 0,
                                 pids: [], ports: [], sockets: [], cmd: cmd, children: [])
                 order.append(id)
             }
             byID[id]!.cpu += cpuV
+            byID[id]!.gpu += gpuV
             byID[id]!.rss_mb += rssMB
             byID[id]!.pids.append(Int(r.pid))
             byID[id]!.children.append(Child(
                 pid: Int(r.pid), label: baseName(exe), cpu: round1(cpuV),
-                rss_mb: round1(rssMB), cmd: cmd))
+                gpu: round1(gpuV), rss_mb: round1(rssMB), cmd: cmd))
             if let ps = sock.ports[r.pid] { byID[id]!.ports.append(contentsOf: ps) }
             if let ss = sock.unixListen[r.pid] { byID[id]!.sockets.append(contentsOf: ss) }
         }
@@ -151,13 +196,15 @@ public final class Collector {
         for id in order {
             var n = byID[id]!
             n.cpu = round1(n.cpu)
+            n.gpu = round1(n.gpu)
             n.rss_mb = round1(n.rss_mb)
             n.pids.sort()
             n.ports = dedupPorts(n.ports)
             n.sockets = Array(Set(n.sockets)).sorted()
             n.children.sort { $0.cpu > $1.cpu }
-            // keep only meaningful services
-            if n.cpu >= minCPU || n.rss_mb >= minMB || !n.ports.isEmpty || !n.sockets.isEmpty {
+            // keep only meaningful services — a GPU-busy node survives even if its
+            // CPU/RAM are low (the runaway-GPU process is the whole point).
+            if n.cpu >= minCPU || n.gpu >= 1 || n.rss_mb >= minMB || !n.ports.isEmpty || !n.sockets.isEmpty {
                 nodes.append(n)
             }
         }
