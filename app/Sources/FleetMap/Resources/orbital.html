@@ -180,7 +180,6 @@
     </div>
     <div class="vtoggle" id="vtoggle">
       <button data-view="list">List</button>
-      <button data-view="graph">Graph</button>
       <button data-view="orbit" class="on">Orbit</button>
     </div>
     <div id="stats"></div>
@@ -191,7 +190,6 @@
       <div class="phead" id="phead"></div>
       <div id="pbody"></div>
     </div>
-    <div id="graph" class="view"><canvas id="gcv"></canvas><div id="graph-hint">graph · drag to move · click a node · scroll to zoom · ▸ expands grouped apps</div></div>
     <div id="orbit" class="view"><canvas id="ocv"></canvas><div id="orbit-hint">orbit · drag to pan · scroll to zoom · click a body</div></div>
     <div id="hud"></div>
   </div>
@@ -434,173 +432,6 @@ const Orbit = (function () {
   return { rebuild, kick };
 })();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Graph view — force-directed process/connection graph. Faithful port of the
-// production graph.html simulation (repulsion + center gravity + edge springs,
-// enter/leave lifecycle), rendered into the shell's own themed canvas and fed
-// from the same in-memory SNAP the shell already holds (no second document, no
-// iframe). Node clicks route through the shared select()/Mission-HUD path.
-// ─────────────────────────────────────────────────────────────────────────────
-const Graph = (function () {
-  const cv = document.getElementById("gcv");
-  const ctx = cv.getContext("2d");
-  let W = 0, H = 0, DPR = 1, raf = 0;
-  const view = { x: 0, y: 0, k: 1, inited: false };
-  const nodes = new Map();   // id -> {…node, x,y,vx,vy,alpha,r,tr,missed,dead}
-  let edges = [];
-  const GRACE = 2;           // polls a node may be missing before it ages out
-
-  function resize() {
-    DPR = window.devicePixelRatio || 1; W = cv.clientWidth; H = cv.clientHeight;
-    cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    if (!view.inited && W > 0) { view.x = W / 2; view.y = H / 2; view.inited = true; }
-  }
-  function radius(rss) { return Math.max(7, Math.min(58, 7 + Math.sqrt(rss) * 1.5)); }
-
-  // emerge next to a connected, living neighbor — not from a random void
-  function spawnPos(id, edgs) {
-    for (const e of edgs) {
-      const other = e.src === id ? nodes.get(e.dst) : e.dst === id ? nodes.get(e.src) : null;
-      if (other && !other.dead) return { x: other.x + (Math.random() - .5) * 70, y: other.y + (Math.random() - .5) * 70 };
-    }
-    return { x: (Math.random() - .5) * 140, y: (Math.random() - .5) * 140 };
-  }
-
-  // Rebuild from a fresh SNAP. Same enter/age-out lifecycle as graph.html so the
-  // sim is stable across pushes.
-  function rebuild(snap) {
-    const incoming = new Map(snap.nodes.map(n => [n.id, n]));
-    for (const n of snap.nodes) {
-      let node = nodes.get(n.id);
-      if (node) { Object.assign(node, n); node.missed = 0; node.dead = false; node.tr = radius(n.rss_mb); }
-      else { const sp = spawnPos(n.id, snap.edges); nodes.set(n.id, { ...n, x: sp.x, y: sp.y, vx: 0, vy: 0, alpha: 0, r: 2, tr: radius(n.rss_mb), missed: 0, dead: false }); }
-    }
-    for (const node of nodes.values()) {
-      if (!incoming.has(node.id) && !node.dead) { node.missed = (node.missed || 0) + 1; if (node.missed >= GRACE) node.dead = true; }
-    }
-    edges = snap.edges;   // draw()/step() guard on node presence
-  }
-
-  function lifecycle() {
-    for (const [id, n] of nodes) {
-      if (n.tr != null) n.r += (n.tr - n.r) * 0.18;
-      if (n.dead) { n.alpha -= 0.05; n.r *= 0.93; if (n.alpha <= 0) { nodes.delete(id); if (SELECTED === id) select(null); } }
-      else if (n.alpha < 1) n.alpha = Math.min(1, n.alpha + 0.07);
-    }
-  }
-
-  function step() {
-    const c = cfg();
-    const arr = [...nodes.values()].filter(n => !n.dead);
-    for (let i = 0; i < arr.length; i++) {
-      const a = arr[i];
-      for (let j = i + 1; j < arr.length; j++) {
-        const b = arr[j];
-        let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 0.01;
-        const force = 2600 / d2, d = Math.sqrt(d2);
-        const fx = dx / d * force, fy = dy / d * force;
-        a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
-      }
-      a.vx += (0 - a.x) * 0.004; a.vy += (0 - a.y) * 0.004;   // gravity to world center
-    }
-    for (const e of edges) {
-      const a = nodes.get(e.src), b = nodes.get(e.dst);
-      if (!a || !b || a.dead || b.dead) continue;
-      let dx = b.x - a.x, dy = b.y - a.y, d = Math.sqrt(dx * dx + dy * dy) + .01;
-      const f = (d - (90 + a.r + b.r)) * 0.012, fx = dx / d * f, fy = dy / d * f;
-      a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
-    }
-    const moving = c.motion;
-    for (const a of arr) {
-      if (a === dragging) continue;
-      a.vx *= 0.86; a.vy *= 0.86;
-      if (moving) { a.x += a.vx; a.y += a.vy; }
-    }
-  }
-
-  function draw() {
-    const c = cfg(), sel = SELECTED;
-    ctx.clearRect(0, 0, W, H);
-    ctx.save(); ctx.translate(view.x, view.y); ctx.scale(view.k, view.k);
-    // edges (tcp accent, unix violet — themed)
-    for (const e of edges) {
-      const a = nodes.get(e.src), b = nodes.get(e.dst);
-      if (!a || !b) continue;
-      ctx.globalAlpha = Math.min(a.alpha, b.alpha) * (e.kind === "unix" ? .45 : .5);
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-      ctx.strokeStyle = e.kind === "unix" ? c.edgeUnix : c.edgeTcp;
-      ctx.lineWidth = 1 / view.k * (e.kind === "unix" ? 1.2 : 1.6);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-    // nodes
-    for (const n of nodes.values()) {
-      const heat = c.heat(n.cpu);
-      ctx.beginPath(); ctx.arc(n.x, n.y, Math.max(0, n.r), 0, 6.28);
-      ctx.fillStyle = heat;
-      ctx.globalAlpha = n.alpha * (n.id === sel ? 1 : .92);
-      ctx.fill();
-      if (n.id === sel) { ctx.lineWidth = 3 / view.k; ctx.strokeStyle = c.accent; ctx.stroke(); }
-      ctx.globalAlpha = n.alpha;
-      if (n.ports && n.ports.length) {
-        ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 3, 0, 6.28);
-        ctx.lineWidth = 2 / view.k;
-        ctx.strokeStyle = n.ports.some(p => p.scope === "all") ? "#f0883e" : "#3fb950";
-        ctx.stroke();
-      }
-      if (view.k > 0.45 || n.r > 22) {
-        ctx.fillStyle = c.fg; ctx.font = `${12 / view.k}px ${c.uiFont}`; ctx.textAlign = "center";
-        ctx.fillText(n.label, n.x, n.y + n.r + 13 / view.k);
-        if (n.ports && n.ports.length) {
-          ctx.fillStyle = c.fgDim; ctx.font = `${10 / view.k}px ${c.monoFont}`;
-          ctx.fillText(":" + n.ports.map(p => p.port).slice(0, 4).join(" :"), n.x, n.y + n.r + 26 / view.k);
-        }
-      }
-    }
-    ctx.restore(); ctx.globalAlpha = 1;
-  }
-
-  function frame() {
-    if (VIEW === "graph") {
-      if (W === 0 || cv.width === 0 || cv.clientWidth !== W || cv.clientHeight !== H) resize();
-      if (view.inited) { lifecycle(); step(); draw(); }
-    }
-    raf = requestAnimationFrame(frame);
-  }
-
-  // ── interaction (pan/zoom/drag/click) ──
-  let dragging = null, dragMoved = false, panning = false, last = { x: 0, y: 0 };
-  function toWorld(mx, my) { return { x: (mx - view.x) / view.k, y: (my - view.y) / view.k }; }
-  function hit(mx, my) { const w = toWorld(mx, my); let f = null; for (const n of nodes.values()) { if (n.dead) continue; const dx = w.x - n.x, dy = w.y - n.y; if (dx * dx + dy * dy <= n.r * n.r) f = n; } return f; }
-  cv.addEventListener("mousedown", e => {
-    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
-    const n = hit(mx, my); dragMoved = false;
-    if (n) dragging = n; else { panning = true; last = { x: mx, y: my }; }
-  });
-  window.addEventListener("mousemove", e => {
-    if (VIEW !== "graph") return;
-    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
-    if (dragging) { const w = toWorld(mx, my); dragging.x = w.x; dragging.y = w.y; dragging.vx = 0; dragging.vy = 0; dragMoved = true; }
-    else if (panning) { view.x += mx - last.x; view.y += my - last.y; last = { x: mx, y: my }; }
-  });
-  window.addEventListener("mouseup", () => {
-    if (dragging && !dragMoved) select(dragging.id);
-    dragging = null; panning = false;
-  });
-  cv.addEventListener("wheel", e => {
-    e.preventDefault(); const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
-    const f = e.deltaY < 0 ? 1.1 : 0.9;
-    view.x = mx - (mx - view.x) * f; view.y = my - (my - view.y) * f; view.k = Math.max(0.2, Math.min(4, view.k * f));
-  }, { passive: false });
-
-  resize();
-  const ro = new ResizeObserver(() => { resize(); if (view.inited) draw(); }); ro.observe(cv);
-  const kick = () => { if (W === 0 || cv.clientWidth !== W || cv.clientHeight !== H) resize(); if (view.inited) draw(); };
-  requestAnimationFrame(kick); setTimeout(kick, 0); setTimeout(kick, 130); setTimeout(kick, 420);
-  frame();
-
-  return { rebuild, kick };
-})();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // List view — production-faithful table (port of ListView.swift + Theme.swift)
@@ -853,10 +684,8 @@ function setView(v) {
   VIEW = v;
   document.querySelectorAll("#vtoggle button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
   document.getElementById("list").classList.toggle("show", v === "list");
-  document.getElementById("graph").classList.toggle("show", v === "graph");
   document.getElementById("orbit").classList.toggle("show", v === "orbit");
   if (v === "list") List.render();
-  else if (v === "graph") Graph.kick();
   else Orbit.kick();
 }
 document.querySelectorAll("#vtoggle button").forEach(b => b.onclick = () => setView(b.dataset.view));
@@ -942,7 +771,6 @@ function merge(snap) {
   SNAP = { nodes: snap.nodes || [], edges: snap.edges || [], hidden: snap.hidden || 0 };
   recordHistory(SNAP);
   Orbit.rebuild(SNAP);
-  Graph.rebuild(SNAP);
   renderStats();
   if (VIEW === "list") List.render();
   if (SELECTED) { if (SNAP.nodes.some(n => n.id === SELECTED)) renderHud(); else select(null); }
