@@ -27,7 +27,7 @@ struct GraphView: NSViewRepresentable {
         weak var web: WKWebView?
         private var lastTS: Int64 = -1
 
-        func push(_ snap: Snapshot) {
+        @MainActor func push(_ snap: Snapshot) {
             guard snap.ts != lastTS, let web else { return }
             lastTS = snap.ts
             guard let data = try? JSONEncoder().encode(snap) else { return }
