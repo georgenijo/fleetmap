@@ -48,7 +48,16 @@ cli/   the original Go tool — single binary, stdlib-only, serves the same
 Both speak the **same snapshot JSON** (`nodes`, `edges`), so the web canvas in
 `cli/` is reused inside the native app's graph tab.
 
-## Native app (`app/`)
+## Download
+
+Grab the latest signed, notarized build from the
+**[Releases page](https://github.com/georgenijo/fleetmap/releases/latest)** —
+download `FleetMap-X.Y.Z.dmg`, open it, and drag **FleetMap** to Applications.
+It opens cleanly with no Gatekeeper warning. Requires macOS 14+.
+
+Cutting a release is documented in [RELEASING.md](./RELEASING.md).
+
+## Build from source (`app/`)
 
 ```sh
 cd app
