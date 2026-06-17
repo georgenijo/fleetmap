@@ -21,6 +21,7 @@ struct ContentView: View {
 struct HeaderBar: View {
     @EnvironmentObject var store: SnapshotStore
     @Binding var pane: Pane
+    @AppStorage("menuBarVisible") private var menuBarVisible = true
 
     var body: some View {
         HStack(spacing: 16) {
@@ -42,11 +43,25 @@ struct HeaderBar: View {
 
             stat("\(store.snapshot.nodes.count)", "nodes")
             stat(String(format: "%.0f%%", store.totalCPU), "cpu")
+            if store.totalGPU > 0 {
+                stat(String(format: "%.0f%%", store.totalGPU), "gpu")
+                    .help("system-wide GPU utilization")
+            }
             stat(String(format: "%.1f GB", store.totalRAMGB), "ram")
             if store.skipped > 0 {
                 stat("\(store.skipped)", "hidden")
                     .help("processes owned by other users — run privileged for full coverage")
             }
+
+            Divider().frame(height: 22).padding(.horizontal, 2)
+
+            Button { menuBarVisible.toggle() } label: {
+                Image(systemName: "menubar.rectangle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(menuBarVisible ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+            }
+            .buttonStyle(.plain)
+            .help(menuBarVisible ? "Hide the menu-bar readout" : "Show the menu-bar readout")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

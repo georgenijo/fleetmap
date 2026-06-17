@@ -5,7 +5,12 @@ let package = Package(
     name: "fleetmap",
     platforms: [.macOS(.v14)],
     targets: [
-        .target(name: "FleetCore"),
+        .target(name: "CIOHID"),
+        .target(
+            name: "FleetCore",
+            dependencies: ["CIOHID"],
+            linkerSettings: [.linkedFramework("IOKit")]
+        ),
         .executableTarget(
             name: "fleetdump",
             dependencies: ["FleetCore"]
