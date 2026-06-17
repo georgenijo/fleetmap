@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fleetmap</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#21262d; --fg:#c9d1d9; --dim:#8b949e; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:13px/1.5 -apple-system,SFMono-Regular,Menlo,monospace; overflow:hidden; }
+  #wrap { position:fixed; inset:0; }
+  canvas { display:block; width:100%; height:100%; }
+  header { position:fixed; top:0; left:0; right:0; display:flex; gap:18px; align-items:center;
+    padding:8px 14px; background:rgba(13,17,23,.82); backdrop-filter:blur(6px);
+    border-bottom:1px solid var(--line); z-index:5; }
+  header b { color:#e6edf3; font-size:14px; letter-spacing:.3px; }
+  header .stat { color:var(--dim); }
+  header .stat span { color:#e6edf3; }
+  .legend { margin-left:auto; display:flex; gap:14px; align-items:center; color:var(--dim); }
+  .swatch { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:5px; vertical-align:-1px; }
+  .ln { display:inline-block; width:18px; height:0; border-top:2px solid; margin-right:5px; vertical-align:3px; }
+  #detail { position:fixed; top:46px; right:0; width:340px; max-height:calc(100% - 46px);
+    overflow:auto; background:var(--panel); border-left:1px solid var(--line);
+    padding:14px 16px; z-index:6; transform:translateX(100%); transition:transform .18s ease; }
+  #detail.open { transform:none; }
+  #detail h2 { margin:0 0 2px; font-size:15px; color:#e6edf3; word-break:break-all; }
+  #detail .k { color:var(--dim); margin-top:10px; text-transform:uppercase; font-size:10px; letter-spacing:.6px; }
+  #detail .cmd { background:#0d1117; border:1px solid var(--line); border-radius:6px; padding:7px 9px;
+    white-space:pre-wrap; word-break:break-all; color:#9ecbff; font-size:12px; }
+  #detail .row { display:flex; justify-content:space-between; padding:2px 0; border-bottom:1px solid var(--line); }
+  #detail .badge { display:inline-block; background:#1f6feb22; border:1px solid #1f6feb55; color:#79c0ff;
+    border-radius:5px; padding:1px 7px; margin:2px 4px 2px 0; font-size:11px; }
+  #detail .all { color:#f0883e; border-color:#f0883e55; background:#f0883e22; }
+  #detail close, #detail .x { position:absolute; top:10px; right:12px; cursor:pointer; color:var(--dim); }
+  #hint { position:fixed; bottom:8px; left:14px; color:var(--dim); z-index:5; }
+  .err { color:#f85149; }
+  /* embedded in the native app: hide the in-page chrome, app provides it */
+  body.embedded header { display:none; }
+  body.embedded #detail { top:0; max-height:100%; }
+  body.embedded { background:transparent; }
+  /* view toggle */
+  .toggle { display:flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .toggle button { background:transparent; border:0; color:var(--dim); padding:4px 11px; cursor:pointer; font:inherit; }
+  .toggle button.on { background:#1f6feb22; color:#79c0ff; }
+  /* list view */
+  #list { position:fixed; top:46px; left:0; right:0; bottom:0; overflow:auto; display:none; z-index:4; }
+  #list.show { display:block; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  thead th { position:sticky; top:0; background:#11161d; color:var(--dim); text-align:right;
+    padding:7px 12px; border-bottom:1px solid var(--line); cursor:pointer; white-space:nowrap; user-select:none; }
+  thead th.l { text-align:left; }
+  thead th:hover { color:#e6edf3; }
+  thead th .arr { color:#58a6ff; }
+  tbody td { padding:5px 12px; border-bottom:1px solid #161b22; text-align:right; white-space:nowrap; }
+  tbody td.l { text-align:left; }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover { background:#161b22; }
+  tbody tr.sel { background:#1f6feb22; }
+  tbody tr.kid td { color:var(--dim); background:#0b0f14; }
+  tbody tr.kid td.name { padding-left:34px; }
+  .caret { display:inline-block; width:12px; color:var(--dim); cursor:pointer; }
+  .cpucell { border-radius:4px; padding:1px 6px; color:#0d1117; font-weight:600; }
+  .pill { display:inline-block; background:#1f6feb22; border:1px solid #1f6feb55; color:#79c0ff;
+    border-radius:4px; padding:0 5px; margin-left:3px; font-size:11px; }
+  .pill.all { color:#f0883e; border-color:#f0883e55; background:#f0883e22; }
+  td.cmd { color:#8b949e; max-width:420px; overflow:hidden; text-overflow:ellipsis; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv"></canvas></div>
+<header>
+  <b>🛰 fleetmap</b>
+  <div class="toggle">
+    <button id="tg-graph" class="on" onclick="setMode('graph')">graph</button>
+    <button id="tg-list" onclick="setMode('list')">list</button>
+  </div>
+  <span class="stat">nodes <span id="s-nodes">0</span></span>
+  <span class="stat">cpu <span id="s-cpu">0</span>%</span>
+  <span class="stat">ram <span id="s-ram">0</span> GB</span>
+  <span class="stat" id="s-err"></span>
+  <div class="legend">
+    <span><span class="swatch" style="background:#3fb950"></span>idle</span>
+    <span><span class="swatch" style="background:#d29922"></span>busy</span>
+    <span><span class="swatch" style="background:#f85149"></span>hot CPU</span>
+    <span><span class="ln" style="border-color:#58a6ff"></span>tcp</span>
+    <span><span class="ln" style="border-color:#8957e5"></span>unix</span>
+    <span>size = RAM</span>
+  </div>
+</header>
+<div id="list"><table>
+  <thead><tr id="thead"></tr></thead>
+  <tbody id="tbody"></tbody>
+</table></div>
+<div id="detail"><span class="x" onclick="closeDetail()">✕</span><div id="detail-body"></div></div>
+<div id="hint">drag to move · click a node for detail · scroll to zoom</div>
+
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+let W=0,H=0,DPR=1;
+function resize(){ DPR=window.devicePixelRatio||1; W=cv.clientWidth; H=cv.clientHeight;
+  cv.width=W*DPR; cv.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0); }
+window.addEventListener('resize', resize); resize();
+
+// view transform (pan/zoom)
+let view={x:W/2,y:H/2,k:1};
+let nodes=new Map();   // id -> {id,label,...,x,y,vx,vy,r}
+let edges=[];
+let selected=null;
+
+function radius(rss){ return Math.max(7, Math.min(58, 7 + Math.sqrt(rss)*1.5)); }
+function cpuColor(cpu){
+  const c=Math.max(0,Math.min(100,cpu));
+  const hue=140*(1-c/100);            // 140=green -> 0=red
+  return `hsl(${hue},70%,52%)`;
+}
+
+// ---- list view (Activity-Monitor style) ----
+let mode='graph', lastSnap={nodes:[],edges:[]}, sortKey='cpu', sortDir=-1;
+const expanded=new Set();
+const COLS=[
+  {key:'label',  name:'Process', l:true},
+  {key:'cpu',    name:'CPU %'},
+  {key:'rss_mb', name:'RAM'},
+  {key:'pids',   name:'Procs'},
+  {key:'ports',  name:'Ports', l:true},
+  {key:'conns',  name:'Conns'},
+  {key:'cmd',    name:'Command', l:true},
+];
+function getVal(n,k){
+  if(k==='pids')  return n.pids.length;
+  if(k==='ports') return n.ports.length;
+  return n[k];
+}
+function fmtMB(v){ return v>=1024 ? (v/1024).toFixed(1)+' GB' : v.toFixed(0)+' MB'; }
+function portPills(ports){
+  if(!ports.length) return '<span style="color:var(--dim)">—</span>';
+  const shown=ports.slice(0,5).map(p=>`<span class="pill ${p.scope==='all'?'all':''}">:${p.port}${p.scope==='all'?'⚠':''}</span>`).join('');
+  return shown + (ports.length>5?`<span class="pill">+${ports.length-5}</span>`:'');
+}
+function setMode(m){
+  mode=m;
+  document.getElementById('tg-graph').classList.toggle('on', m==='graph');
+  document.getElementById('tg-list').classList.toggle('on', m==='list');
+  document.getElementById('wrap').style.display = m==='graph'?'block':'none';
+  document.getElementById('list').classList.toggle('show', m==='list');
+  document.getElementById('hint').textContent = m==='graph'
+    ? 'drag to move · click a node for detail · scroll to zoom'
+    : 'click a column to sort · click a row for detail · ▸ expands grouped apps';
+  if(m==='list') renderList();
+}
+function sortBy(k){
+  if(sortKey===k) sortDir*=-1;
+  else { sortKey=k; sortDir=(k==='label'||k==='cmd'||k==='ports')?1:-1; }
+  renderList();
+}
+function toggleExpand(id,ev){ ev.stopPropagation(); expanded.has(id)?expanded.delete(id):expanded.add(id); renderList(); }
+function renderList(){
+  const conns={};
+  for(const e of lastSnap.edges){ conns[e.src]=(conns[e.src]||0)+1; conns[e.dst]=(conns[e.dst]||0)+1; }
+  const rows=lastSnap.nodes.map(n=>({...n, conns:conns[n.id]||0}));
+  rows.sort((a,b)=>{
+    let x=getVal(a,sortKey), y=getVal(b,sortKey);
+    if(typeof x==='string') return sortDir*x.localeCompare(y);
+    return sortDir*((x||0)-(y||0));
+  });
+  // header
+  document.getElementById('thead').innerHTML = COLS.map(c=>{
+    const arr = sortKey===c.key ? `<span class="arr">${sortDir<0?'▼':'▲'}</span>` : '';
+    return `<th class="${c.l?'l':''}" onclick="sortBy('${c.key}')">${c.name} ${arr}</th>`;
+  }).join('');
+  // body
+  const out=[];
+  for(const n of rows){
+    const can = n.children && n.children.length>1;
+    const caret = can ? `<span class="caret" onclick="toggleExpand('${n.id}',event)">${expanded.has(n.id)?'▾':'▸'}</span>` : '<span class="caret"></span>';
+    const sel = n.id===selected ? 'sel' : '';
+    out.push(`<tr class="${sel}" onclick="pickRow('${n.id}')">
+      <td class="l name">${caret}${esc(n.label)} ${n.kind==='app'?`<span style="color:var(--dim)">·${n.pids.length}</span>`:''}</td>
+      <td><span class="cpucell" style="background:${cpuColor(n.cpu)}">${n.cpu.toFixed(1)}</span></td>
+      <td>${fmtMB(n.rss_mb)}</td>
+      <td>${n.pids.length}</td>
+      <td class="l">${portPills(n.ports)}</td>
+      <td>${n.conns||''}</td>
+      <td class="l cmd">${esc(n.cmd||'—')}</td>
+    </tr>`);
+    if(can && expanded.has(n.id)){
+      for(const c of n.children){
+        out.push(`<tr class="kid"><td class="l name">${esc(c.label)} <span style="color:#6e7681">#${c.pid}</span></td>
+          <td>${c.cpu.toFixed(1)}</td><td>${fmtMB(c.rss_mb)}</td><td></td><td></td><td></td>
+          <td class="l cmd">${esc(c.cmd||'—')}</td></tr>`);
+      }
+    }
+  }
+  document.getElementById('tbody').innerHTML=out.join('');
+}
+function pickRow(id){
+  selected=id;
+  const n=lastSnap.nodes.find(x=>x.id===id);
+  if(n) showDetail(n);
+  renderList();
+}
+
+async function poll(){
+  try{
+    const r=await fetch('/api/snapshot'); const snap=await r.json();
+    document.getElementById('s-err').textContent='';
+    merge(snap);
+  }catch(e){
+    const el=document.getElementById('s-err'); el.className='stat err'; el.textContent='collect failed';
+  }
+}
+
+const GRACE=2;          // polls a node may be missing before it starts leaving
+function spawnPos(id, edgs){
+  // emerge next to a connected, living neighbor — not from a random void
+  for(const e of edgs){
+    const other = e.src===id ? nodes.get(e.dst) : e.dst===id ? nodes.get(e.src) : null;
+    if(other && !other.dead) return {x:other.x+(Math.random()-.5)*70, y:other.y+(Math.random()-.5)*70};
+  }
+  return {x:(Math.random()-.5)*140, y:(Math.random()-.5)*140}; // else near world center
+}
+function merge(snap){
+  lastSnap=snap;
+  const incoming=new Map(snap.nodes.map(n=>[n.id,n]));
+  let totalCpu=0, totalRam=0;
+  for(const n of snap.nodes){
+    totalCpu+=n.cpu; totalRam+=n.rss_mb;
+    let node=nodes.get(n.id);
+    if(node){
+      Object.assign(node, n);        // refresh stats, keep x/y/vx/vy/alpha
+      node.missed=0; node.dead=false;
+      node.tr=radius(n.rss_mb);       // animate radius toward new RAM
+    } else {
+      const sp=spawnPos(n.id, snap.edges);
+      node={...n, x:sp.x, y:sp.y, vx:0, vy:0, alpha:0, r:2, tr:radius(n.rss_mb), missed:0, dead:false};
+      nodes.set(n.id, node);
+    }
+  }
+  // anything not in this snapshot ages out; grace period absorbs flapping/transients
+  for(const node of nodes.values()){
+    if(!incoming.has(node.id) && !node.dead){
+      node.missed=(node.missed||0)+1;
+      if(node.missed>=GRACE) node.dead=true;
+    }
+  }
+  edges=snap.edges;                  // draw() guards on node presence
+  document.getElementById('s-nodes').textContent=snap.nodes.length;
+  document.getElementById('s-cpu').textContent=totalCpu.toFixed(0);
+  document.getElementById('s-ram').textContent=(totalRam/1024).toFixed(1);
+  if(mode==='list') renderList();
+  if(selected){
+    const sn=lastSnap.nodes.find(x=>x.id===selected);
+    if(sn) showDetail(sn);
+  }
+}
+
+// per-frame node lifecycle: grow+fade in (enter), shrink+fade out (leave)
+function lifecycle(){
+  for(const [id,n] of nodes){
+    if(n.tr!=null) n.r += (n.tr - n.r)*0.18;
+    if(n.dead){
+      n.alpha -= 0.05;
+      n.r *= 0.93;
+      if(n.alpha<=0){ nodes.delete(id); if(selected===id) closeDetail(); }
+    } else if(n.alpha<1){
+      n.alpha = Math.min(1, n.alpha+0.07);
+    }
+  }
+}
+
+// ---- force simulation ----
+function step(){
+  const arr=[...nodes.values()].filter(n=>!n.dead);
+  const cx=0, cy=0; // world center
+  // repulsion
+  for(let i=0;i<arr.length;i++){
+    const a=arr[i];
+    for(let j=i+1;j<arr.length;j++){
+      const b=arr[j];
+      let dx=a.x-b.x, dy=a.y-b.y, d2=dx*dx+dy*dy+0.01;
+      const force=2600/d2;
+      const d=Math.sqrt(d2);
+      const fx=dx/d*force, fy=dy/d*force;
+      a.vx+=fx; a.vy+=fy; b.vx-=fx; b.vy-=fy;
+    }
+    // gravity to center
+    a.vx+=(cx-a.x)*0.004; a.vy+=(cy-a.y)*0.004;
+  }
+  // springs
+  for(const e of edges){
+    const a=nodes.get(e.src), b=nodes.get(e.dst);
+    if(!a||!b||a.dead||b.dead) continue;
+    let dx=b.x-a.x, dy=b.y-a.y, d=Math.sqrt(dx*dx+dy*dy)+.01;
+    const rest=90+a.r+b.r;
+    const f=(d-rest)*0.012;
+    const fx=dx/d*f, fy=dy/d*f;
+    a.vx+=fx; a.vy+=fy; b.vx-=fx; b.vy-=fy;
+  }
+  for(const a of arr){
+    if(a===dragging) continue;
+    a.vx*=0.86; a.vy*=0.86;
+    a.x+=a.vx; a.y+=a.vy;
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.save();
+  ctx.translate(view.x,view.y); ctx.scale(view.k,view.k);
+  // edges
+  for(const e of edges){
+    const a=nodes.get(e.src), b=nodes.get(e.dst);
+    if(!a||!b) continue;
+    ctx.globalAlpha = Math.min(a.alpha,b.alpha) * (e.kind==='unix'?.45:.5);
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y);
+    ctx.strokeStyle = e.kind==='unix' ? '#8957e5' : '#58a6ff';
+    ctx.lineWidth = 1/view.k * (e.kind==='unix'?1.2:1.6);
+    ctx.stroke();
+  }
+  ctx.globalAlpha=1;
+  // nodes
+  for(const n of nodes.values()){
+    ctx.beginPath(); ctx.arc(n.x,n.y,Math.max(0,n.r),0,Math.PI*2);
+    ctx.fillStyle=cpuColor(n.cpu);
+    ctx.globalAlpha = n.alpha * (n.id===selected?1:.92);
+    ctx.fill();
+    if(n.id===selected){ ctx.lineWidth=3/view.k; ctx.strokeStyle='#fff'; ctx.stroke(); }
+    ctx.globalAlpha=n.alpha;
+    // port badge ring
+    if(n.ports && n.ports.length){
+      ctx.beginPath(); ctx.arc(n.x,n.y,n.r+3,0,Math.PI*2);
+      ctx.lineWidth=2/view.k;
+      ctx.strokeStyle = n.ports.some(p=>p.scope==='all') ? '#f0883e' : '#3fb950';
+      ctx.stroke();
+    }
+    // label
+    if(view.k>0.45 || n.r>22){
+      ctx.fillStyle='#e6edf3'; ctx.font=`${12/view.k}px -apple-system,monospace`;
+      ctx.textAlign='center';
+      ctx.fillText(n.label, n.x, n.y+n.r+13/view.k);
+      if(n.ports && n.ports.length){
+        ctx.fillStyle='#8b949e'; ctx.font=`${10/view.k}px monospace`;
+        ctx.fillText(':'+n.ports.map(p=>p.port).slice(0,4).join(' :'), n.x, n.y+n.r+26/view.k);
+      }
+    }
+  }
+  ctx.restore();
+}
+
+function frame(){ if(mode==='graph'){ lifecycle(); step(); draw(); } requestAnimationFrame(frame); }
+frame();
+
+// ---- interaction ----
+let dragging=null, dragMoved=false, panning=false, last={x:0,y:0};
+function toWorld(mx,my){ return {x:(mx-view.x)/view.k, y:(my-view.y)/view.k}; }
+function hit(mx,my){
+  const w=toWorld(mx,my); let found=null;
+  for(const n of nodes.values()){
+    const dx=w.x-n.x, dy=w.y-n.y;
+    if(dx*dx+dy*dy<=n.r*n.r) found=n;
+  }
+  return found;
+}
+cv.addEventListener('mousedown',e=>{
+  const n=hit(e.offsetX,e.offsetY); dragMoved=false;
+  if(n){ dragging=n; } else { panning=true; last={x:e.offsetX,y:e.offsetY}; }
+});
+window.addEventListener('mousemove',e=>{
+  if(dragging){
+    const r=cv.getBoundingClientRect();
+    const w=toWorld(e.clientX-r.left, e.clientY-r.top);
+    dragging.x=w.x; dragging.y=w.y; dragging.vx=0; dragging.vy=0; dragMoved=true;
+  } else if(panning){
+    view.x+=e.offsetX-last.x; view.y+=e.offsetY-last.y; last={x:e.offsetX,y:e.offsetY};
+  }
+});
+window.addEventListener('mouseup',e=>{
+  if(dragging && !dragMoved){ selected=dragging.id; showDetail(dragging); }
+  dragging=null; panning=false;
+});
+cv.addEventListener('wheel',e=>{
+  e.preventDefault();
+  const f=e.deltaY<0?1.1:0.9;
+  const mx=e.offsetX,my=e.offsetY;
+  view.x=mx-(mx-view.x)*f; view.y=my-(my-view.y)*f; view.k*=f;
+},{passive:false});
+
+function showDetail(n){
+  const d=document.getElementById('detail'); d.classList.add('open');
+  const ports=(n.ports||[]).map(p=>`<span class="badge ${p.scope==='all'?'all':''}">:${p.port} ${p.scope==='all'?'⚠ all':''}</span>`).join('')||'<span style="color:var(--dim)">none</span>';
+  const socks=(n.sockets||[]).map(s=>`<div style="color:#8b949e;word-break:break-all">${s}</div>`).join('')||'<span style="color:var(--dim)">none</span>';
+  const kids=(n.children||[]).map(c=>`<div class="row"><span>${esc(c.label)} <span style="color:var(--dim)">#${c.pid}</span></span><span>${c.cpu.toFixed(0)}% · ${c.rss_mb.toFixed(0)}M</span></div>`).join('');
+  document.getElementById('detail-body').innerHTML=`
+    <h2>${esc(n.label)}</h2>
+    <div style="color:var(--dim)">${n.kind} · ${n.pids.length} proc${n.pids.length>1?'s':''}</div>
+    <div class="k">resources</div>
+    <div class="row"><span>CPU</span><span>${n.cpu.toFixed(1)}%</span></div>
+    <div class="row"><span>RAM</span><span>${n.rss_mb.toFixed(0)} MB</span></div>
+    <div class="k">listening ports</div><div>${ports}</div>
+    <div class="k">command</div><div class="cmd">${esc(n.cmd||'—')}</div>
+    <div class="k">unix sockets served</div>${socks}
+    ${kids?`<div class="k">processes</div>${kids}`:''}
+  `;
+}
+function closeDetail(){ document.getElementById('detail').classList.remove('open'); selected=null; if(mode==='list') renderList(); }
+function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// embedded in the Swift app: snapshots are pushed in over the WKWebView bridge
+// instead of polled over HTTP.
+window.__push = function(snap){
+  try { merge(typeof snap === 'string' ? JSON.parse(snap) : snap); }
+  catch(e){ console.log('push parse error', e); }
+};
+document.body.classList.add('embedded');
+</script>
+</body>
+</html>

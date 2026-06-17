@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Swift / SwiftPM build output
+.build/
+*.app/
+
+# Go build output
+cli/fleetmap
+*.test
+*.out
+
+# editors
+*.swp
+.vscode/
+.idea/
