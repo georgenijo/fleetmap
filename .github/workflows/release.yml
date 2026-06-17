@@ -81,8 +81,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # gh infers the repo from the checkout; --notes-from-tag is
+          # incompatible with --repo, so it is intentionally omitted.
           gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --notes-from-tag \
             "${{ steps.dmg.outputs.name }}"
